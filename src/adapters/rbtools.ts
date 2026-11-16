@@ -5,6 +5,7 @@ import {
     ServerRepository, serverUrl,
 } from '../domain/model';
 import { ProcessError, runProcess } from './process';
+import { diffPrefix, LineMap, RemoteComparison, ReviewerDraft, ReviewComment } from '../domain/comparison';
 
 export class ApiError extends Error {
     constructor(message: string, readonly code: number) { super(message); }
@@ -21,6 +22,11 @@ interface ApiPayload { stat: string; err?: { code: number; msg: string }; total_
 export interface Connection {
     server: string; username: string; version: string; supportsHistory: boolean;
     maxDiffSize: number; repositories: ServerRepository[]; rbtVersion: string;
+    defaultRepository?: string;
+}
+export interface RepositoryContext {
+    server: string;
+    defaults: { server?: string; targetRef?: string; repository?: string; people?: string | string[]; groups?: string | string[]; branch?: string };
 }
 
 /** All API reads share RBTools authentication and trusted repository config. */
@@ -107,11 +113,41 @@ export class RBToolsAdapter {
         const info = await this.api<{ info: { product: { package_version: string }; site: { url: string };
             capabilities: { review_requests?: { supports_history?: boolean }; diffs?: { max_diff_size?: number } } } }>('/info/', {}, signal);
         const username = await this.username(signal);
-        const context = JSON.parse((await this.command(['rbtflow-context', '--json', '--disable-cache'], signal)).toString('utf8')) as { server_url: string };
+        const context = await this.context(signal);
         const repositories = (await this.list<ServerRepository>('/repositories/', 'repositories', {}, signal)).filter(repo => repo.tool === 'Git');
-        return { server: serverUrl(context.server_url), username,
+        return { server: context.server, username,
             version: info.info.product.package_version, supportsHistory: !!info.info.capabilities.review_requests?.supports_history,
-            maxDiffSize: info.info.capabilities.diffs?.max_diff_size ?? 0, repositories, rbtVersion };
+            maxDiffSize: info.info.capabilities.diffs?.max_diff_size ?? 0, repositories, rbtVersion, defaultRepository: context.defaults.repository };
+    }
+    async context(signal?: AbortSignal): Promise<RepositoryContext> {
+        const data = JSON.parse((await this.command(['rbtflow-context', '--json', '--disable-cache'], signal)).toString('utf8')) as { server_url: string; defaults?: RepositoryContext['defaults'] };
+        return { server: serverUrl(data.server_url), defaults: data.defaults ?? {} };
+    }
+    async repositoryDefaults(signal?: AbortSignal): Promise<RepositoryContext['defaults']> {
+        const payload = JSON.parse((await this.command(['rbtflow-defaults', '--json'], signal)).toString('utf8')) as { defaults: RepositoryContext['defaults'] };
+        return payload.defaults;
+    }
+    async comparisonData(comparison: RemoteComparison, fileId: number, part: 'base' | 'head' | 'patch', signal?: AbortSignal): Promise<Buffer> {
+        const payload = JSON.parse((await this.command(['rbtflow-read-comparison', '--json', '--disable-cache',
+            String(comparison.requestId), String(comparison.selected.revision), comparison.selected.scope, String(fileId), part], signal)).toString('utf8')) as { content: string };
+        return Buffer.from(payload.content, 'base64');
+    }
+    async lines(comparison: RemoteComparison, fileId: number, signal?: AbortSignal): Promise<LineMap> {
+        return JSON.parse((await this.command(['rbtflow-read-comparison', '--json', '--disable-cache',
+            String(comparison.requestId), String(comparison.selected.revision), comparison.selected.scope, String(fileId), 'lines'], signal)).toString('utf8')) as LineMap;
+    }
+    async fileComments(comparison: RemoteComparison, fileId: number, signal?: AbortSignal): Promise<ReviewComment[]> {
+        return this.list<ReviewComment>(`${diffPrefix(comparison)}files/${fileId}/diff-comments/`, 'diff_comments', {}, signal);
+    }
+    async reviewerDraft(requestId: number, signal?: AbortSignal): Promise<ReviewerDraft | null> {
+        try { return (await this.api<{ review: ReviewerDraft }>(`/review-requests/${requestId}/reviews/draft/`, {}, signal)).review; }
+        catch (error) { if (error instanceof ApiError && error.code === 100) { return null; } throw error; }
+    }
+    async writeReview(requestId: number, payload: Record<string, unknown>, signal?: AbortSignal): Promise<number> {
+        const result = JSON.parse((await this.command(['rbtflow-save-review', '--json', '--disable-cache'], signal,
+            { '--fields-file': JSON.stringify(payload) }, [String(requestId)])).toString('utf8')) as { review_id: number };
+        if (!Number.isSafeInteger(result.review_id)) { throw new Error('未取得有效审阅 ID，请核对服务器。'); }
+        return result.review_id;
     }
     async username(signal?: AbortSignal): Promise<string> {
         const session = await this.api<{ session: { authenticated: boolean; links: { user?: { title: string } } } }>('/session/', {}, signal);

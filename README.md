@@ -1,9 +1,10 @@
 # RBTFlow
 
-VS Code 的 Review Board 审核扩展：识别 Git 项目，选择审核范围，以原生 diff 预览固定提交，
-通过表单指定审批人、审批组和 bug 号，保存/更新草稿并独立发布。
+VS Code 的 Review Board 审核扩展：在侧边栏提交、查看和审阅代码，使用原生更改列表、diff 和行内评论。
+审批人、bug 号、分支和工具等默认配置按仓库保存。
 
-**0.1.0 已实现审核闭环，包含 merge 的分支默认使用汇总 diff，不改写 Git 历史。**
+**0.2.0 支持本地预览、自己的已提交审核和按 ID 审阅他人的代码，包含审阅意见和 Ship It。**
+包含 merge 的分支默认使用汇总 diff，保留 Git 历史。
 实际执行 merge/land/push 尚未实现。RBTools 是 `rbt` 客户端，Review Board 是服务端；
 扩展可连接现有服务，下面的本地站点仅用于开发，不是插件用户必须部署的后端。
 
@@ -13,18 +14,23 @@ VS Code 的 Review Board 审核扩展：识别 Git 项目，选择审核范围�
 
 ```bash
 bash dev.sh prepare   # 安装 lockfile 中的 Node 依赖并编译
-bash dev.sh package   # 生成 build/rbtflow-0.1.0.vsix，不发布到 Marketplace
+bash dev.sh package   # 生成 build/rbtflow-0.2.0.vsix
 ```
 
 VS Code 使用“Extensions: Install from VSIX”安装该文件，或在本仓库按 F5，选择
 `Run RBTFlow (local lab)`。F5 会准备本地服务并在示例项目中运行扩展。
 
-点击活动栏的 RBTFlow 图标，选择仓库，或执行 **RBTFlow: 打开提交审核**：
+点击活动栏的 RBTFlow 图标，或执行 **RBTFlow: 打开审核侧边栏**。
+“审核”和“更改”使用 VS Code 的视图容器，可通过视图标题的原生菜单/拖放移至下方 Panel。
 
-1. 填写服务器（留空沿用 `.reviewboardrc`），选择目标主线；需要时连接并选择服务器仓库。
-2. 点击“分析并预览”，检查基线、HEAD、merge 提示和变更文件；点击文件打开原生 diff。
-3. 填写审核信息，点击“保存草稿”。更新已有单时先输入 ID 并“载入”，再预览。
-4. 确认后单独“发布当前草稿”，可打开审核网页。
+1. **提交**：选择目标主线，填写标题、说明、审批人和 bug 号；“更多信息”中配置组、测试和已有审核单 ID。
+2. 点击“预览更改”，从原生“更改”列表打开 diff，然后保存草稿，确认后单独发布。
+3. **审阅**：输入自己的或他人的审核单 ID，也可从“我的…”选择；切换已发布版本或自己的差异草稿。
+4. 在原生 diff 的行号处添加评论，填写总体意见，按需勾选 Ship It；先保存审阅草稿，再发布审阅。
+
+服务器地址从现有 RBTools 配置读取；目标主线、服务器仓库、BASE、审核模式、工具路径和超时均在齿轮“仓库设置”中。
+普通配置和草稿保存在扩展存储，重开同一仓库自动沿用；新建审核保留审批人等默认值，清空单号、标题和说明。
+浏览他人的审核不会改动自己的提交表单。各 worktree 分别保存；API Token 使用 SecretStorage，按服务器区分。
 
 通过 `rbtflow.rbtPath` 指定工作区所在机器的 RBTools 可执行文件，默认 `rbt`。
 可复用 `rbt login`，也可通过 **RBTFlow: 设置服务器 API Token** 存入 SecretStorage。
@@ -62,15 +68,16 @@ bash dev.sh start
 
 ```bash
 bash dev.sh smoke   # 真实 diff/post/发布/更新验证，会创建本地示例审核单
-bash dev.sh test    # Git/进程/状态等核心测试
-bash dev.sh integration  # TypeScript 审核工作流对接真实本地服务
+bash dev.sh test    # Git/进程/仓库缓存/评论行映射测试
+bash dev.sh integration  # 真实服务：提交、跨用户对比、行内评论、审阅发布和恢复
 bash dev.sh host-smoke   # 真实 VS Code Extension Host，需要桌面 DISPLAY 或 xvfb-run
 bash dev.sh status
 bash dev.sh logs
 bash dev.sh stop    # 保留数据；再次 start 继续使用
 ```
 
-最新验证报告：`build/smoke/latest.json`，每轮详细命令、stdout/stderr 和 patch 保存在对应时间目录。
+本地环境验证报告为 `build/smoke/latest.json`，扩展宿主验收为 `build/host/latest.json`；
+测试日志和 patch 均保存在 `build/`，具体证据见扩展文档。
 
 也可手动验证示例仓库。`rbt` 动作保留调用者的工作目录：
 

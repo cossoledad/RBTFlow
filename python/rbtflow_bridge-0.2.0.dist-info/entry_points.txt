@@ -1,4 +1,7 @@
 [rbtools_commands]
+rbtflow-defaults = rbtflow_bridge:Defaults
 rbtflow-context = rbtflow_bridge:Context
 rbtflow-sync-draft = rbtflow_bridge:SyncDraft
 rbtflow-verify-patch = rbtflow_bridge:VerifyPatch
+rbtflow-read-comparison = rbtflow_bridge:ReadComparison
+rbtflow-save-review = rbtflow_bridge:SaveReview

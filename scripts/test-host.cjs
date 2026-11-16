@@ -3,6 +3,23 @@ const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
 const { downloadAndUnzipVSCode, runTests } = require('@vscode/test-electron');
 const root = path.resolve(__dirname, '..');
+async function ensureReviewFixture() {
+  const headers = { Authorization: `Basic ${Buffer.from('admin:rbtflow-local').toString('base64')}` };
+  try {
+    const fixture = JSON.parse(await fs.readFile(path.join(root, 'build/review-test-fixture.json'), 'utf8'));
+    if (!Number.isSafeInteger(fixture.alternateRequestId)) throw new Error('Missing fixture ID');
+    const resource = `http://127.0.0.1:8080/api/review-requests/${fixture.alternateRequestId}/`;
+    const data = await fetch(resource, { headers }).then(response => response.json());
+    const draft = await fetch(resource + 'reviews/draft/', { headers }).then(response => response.json());
+    if (data.review_request?.public && data.review_request.links.submitter?.title === 'reviewer' && draft.err?.code === 100) return;
+  } catch { /* Missing/stale local-lab data will be prepared below. */ }
+  console.log('Preparing another author\'s real Review Board comparison fixture…');
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--test', path.join(root, 'build/extension/test/review.test.js')], { cwd: root, stdio: 'inherit' });
+    child.on('error', reject);
+    child.on('exit', code => code === 0 ? resolve() : reject(new Error('Review fixture preparation failed')));
+  });
+}
 async function main() {
   const resultDir = path.join(root, 'build/host');
   await fs.mkdir(resultDir, { recursive: true });
@@ -16,6 +33,7 @@ async function main() {
     child.on('exit', code => { process.exitCode = code ?? 1; });
     return;
   }
+  await ensureReviewFixture();
   const dir = await fs.mkdtemp(path.join(resultDir, 'run-'));
   const user = path.join(dir, 'user');
   await fs.mkdir(path.join(user, 'User'), { recursive: true });
@@ -29,7 +47,7 @@ async function main() {
     vscodeExecutablePath: executable,
     extensionDevelopmentPath: process.env.RBTFLOW_EXTENSION_PATH || root,
     extensionTestsPath: path.join(root, 'build/extension/test/host.js'),
-    launchArgs: ['--disable-extensions', '--disable-workspace-trust', '--no-sandbox', '--disable-gpu',
+    launchArgs: [...(process.env.RBTFLOW_CDP_PORT ? [`--remote-debugging-port=${process.env.RBTFLOW_CDP_PORT}`] : []), '--disable-extensions', '--disable-workspace-trust', '--no-sandbox', '--disable-gpu',
       '--skip-welcome', '--skip-release-notes', '--user-data-dir', user, '--extensions-dir', path.join(dir, 'extensions'), path.join(root, 'build/workspace')],
   });
   const reportFile = path.join(resultDir, 'latest.json');

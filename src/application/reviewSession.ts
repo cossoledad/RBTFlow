@@ -33,6 +33,9 @@ export class ReviewSession {
         const backend = this.backend(input.server);
         const connection = await backend.connect(signal);
         let repository = connection.repositories.find(repo => repo.id === input.repositoryId);
+        if (!repository && input.repositoryId === null && connection.defaultRepository) {
+            repository = connection.repositories.find(repo => repo.name === connection.defaultRepository);
+        }
         if (!repository && input.repositoryId === null) {
             const remotes = (await this.git.remotes(this.root, signal)).map(remoteKey);
             const matches = connection.repositories.filter(repo => [repo.path, repo.mirror_path].some(url => url && remotes.includes(remoteKey(url))));

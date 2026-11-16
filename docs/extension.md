@@ -1,142 +1,154 @@
-# RBTFlow 0.1.0 扩展
+# RBTFlow 0.2.0 扩展
 
-当前实现了“打开 Git 项目→分析固定范围→原生 diff→填写信息→保存/更新草稿→独立发布”。
-运行时使用工作区机器已有的 Git/RBTools；无需额外常驻 RBTFlow 服务，也不需要 Docker。
+当前支持在 VS Code 侧边栏完成提交、对比和审阅。文件使用原生 TreeView，内容使用只读原生 diff，
+行内意见使用 CommentController。运行时复用工作区机器上的 Git/RBTools，连接现有 Review Board；
+本仓库的本地站点仅供开发，无需额外常驻 RBTFlow 后端或 Docker。
 
-## 功能与使用
+## 界面和操作
 
-活动栏 **RBTFlow / 审核项目** 枚举内置 Git 扩展发现的仓库，也检查各工作区目录的 Git 根。
-多根工作区可选择仓库；活动文件所在仓库作为默认选择。每个 worktree 有独立审核会话。
+活动栏 RBTFlow 提供“审核”和“更改”两个视图；可通过 VS Code 原生视图菜单/拖放移至下方 Panel。
+仓库选择来自内置 Git 扩展和工作区目录，规范根路径去重；已选择仓库会记住，各 worktree 独立。
 
-审核界面包含：
+| 位置 | 内容 |
+| --- | --- |
+| 提交 | 目标主线、标题、说明、审批人、bug 号，预览和保存草稿 |
+| 更多信息 | 审批组、测试说明、分支展示标签、更新说明、已有审核单 ID |
+| 原生齿轮/仓库设置 | 服务器、服务器 Git 仓库、目标主线、显式 BASE、审核模式、rbt 路径、超时、Token |
+| 审阅 | 按 ID 或“我的…”打开，切换差异版本，填写意见、Ship It、保存/发布审阅 |
+| 更改 | 三类来源共用的文件列表，点击进入固定版本原生 diff；工具栏可查看原始 patch |
 
-- 当前仓库、服务器 URL、服务器 Git 仓库、目标主线、可选显式 BASE。
-- 汇总 diff / 逐提交历史模式，当前分支、BASE/HEAD/目标主线的完整 SHA、merge 和脏工作区提示。
-- 文件列表与 VS Code 原生 diff；新增/删除/rename 均使用固定提交内容，不读取工作区文件替代快照。
-- 标题、修改说明、测试说明、审批人、审批组、bug 号、分支展示标签、更新说明。
-- 人员/组搜索，草稿保存、按明确 ID 更新、发布、打开审核页和日志。
-- 待确认写操作恢复；只查询核对，不自动重复创建审核单。
+**提交**：预览 → 检查更改 → 保存/更新草稿 → 单独发布。已有单先载入再预览；审核字段会完整替换，
+包括移除审批人/bug 和清空可选字段。`branch` 是展示标签，Git 合入目标由目标主线决定。
 
-默认审核 merge-base(target, HEAD)→HEAD。高级 BASE 必须是 HEAD 祖先。
-侧分支和 merge 的手工冲突解决保留在快照差异中，不使用 first-parent 拼补丁，也不执行 rebase/squash。
-逐提交模式要求连续线性且无空提交；旧审核单必须保持创建时的模式。
-工作区修改明确排除；正在 merge/rebase/cherry-pick 的仓库拒绝开始新审核计划。
+**审阅**：输入审核单 ID，打开文件，在 diff 行号处添加行内意见；填写总体意见并按需勾选 Ship It，
+先保存审阅草稿，再发布。已保存至服务器的评论显示为服务器草稿；当前版本的编辑/删除需在网页操作。
+本地未保存评论可通过原生线程标题的删除按钮移除。
 
-修改审批信息时，插件将完整替换表单字段，包括清空说明、删除审批人/组和移除 bug 号。
-这通过 Review Board 草稿 API 完成，避免原生 `rbt post` 的“追加 bug、忽略空值”行为。
-`branch` 是展示字段，不是 Git 合入目标或 checkout 命令。
+统一对比支持本地提交预览、自己的已提交审核（含自己的未发布差异草稿）、他人的已发布审核。
+不会请求他人的私有提交草稿，即使当前用户是管理员。远程文件通过 Review Board 的
+original-file/patched-file 获取，包含服务端 parent diff 重建，不用本地 HEAD 冒充远程版本。
+因此查看他人代码无需 checkout 对方分支，也不要求其服务器仓库映射到当前 Git remote；编辑自己的提交仍要求仓库匹配。
 
-## 配置和认证
+## 缓存、配置和认证
 
-| 设置 | 默认 | 作用 |
+普通状态保存在扩展 `globalState`，按 Git 规范 worktree 根路径区分，同一 profile/扩展宿主下换工作区或重开窗口仍可使用，
+不会写入源码或 `.vscode/settings.json`。不同克隆/worktree、VS Code profile 和远程宿主分别存储。
+0.1.0 的 workspaceState 表单和待确认提交会迁移，确认写入新存储后才移除旧待确认记录。
+
+| 状态 | 保存规则 |
+| --- | --- |
+| 仓库默认值 | 服务器/仓库 ID、目标主线、BASE、模式、审批人/组、bug、分支、测试说明 |
+| 自己的提交草稿 | 全表单，含标题/说明、更新说明和已有单号；新建时清空这些一次性内容 |
+| 工具 | 仓库自己的 rbt 路径和超时，未指定则使用 VS Code 设置 |
+| 审阅草稿 | 按仓库 + 服务器 + 登录用户 + 审核单 + 差异 ID 单独存储，包括本地行内评论 |
+| 导航 | 当前仓库、提交/审阅模式、最近单号、更多信息展开状态 |
+| 凭据 | API Token 在 SecretStorage 中按服务器保存，不放入普通配置 |
+
+浏览别人的审核、载入服务器字段或切换 diff 不会覆盖仓库默认审批人和自己的提交表单。
+初次打开可从 `.reviewboardrc`/RBTools 配置读取服务地址、tracking branch、默认人/组和分支标签。
+之后沿用仓库缓存；服务器仓库优先使用明确选择、配置中的 REPOSITORY，再匹配 Git remote。
+重开后需重新预览或打开远程单号，避免把旧缓存当作已验证的服务器/Git 状态。
+
+| VS Code 设置 | 默认值 | 用途 |
 | --- | --- | --- |
-| `rbtflow.rbtPath` | `rbt` | 实际 RBTools executable 路径，不接受 shell 参数 |
-| `rbtflow.serverUrl` | 空 | 新表单默认服务器；空则沿用 RBTools 配置 |
-| `rbtflow.commandTimeoutSeconds` | 120 | 单次 RBTools 操作超时，可设 5–1800 秒 |
+| `rbtflow.rbtPath` | `rbt` | 工作区机器上的 executable，不能附加 shell 参数 |
+| `rbtflow.serverUrl` | 空 | 没有仓库缓存时的服务器默认值，空则用 RBTools 配置 |
+| `rbtflow.commandTimeoutSeconds` | 120 | 单条命令超时，5–1800 秒 |
 
-表单中的服务器地址优先；连接时保留实际配置 URL，不擅自切换到站点广告的 canonical URL，
-避免代理路径和登录 cookie 失效。可以复用现有 `.reviewboardrc`、`rbt login` 和客户端证书配置。
-图形化 token 设置使用 VS Code SecretStorage，账号密码不进入表单持久化。
+服务器设置留空可复用现有 RBTools 配置，支持 `rbt login` 和已有客户端证书配置。
+连接保留实际配置 URL，不替换为服务器广告的 canonical URL，以保留代理前缀/cookie 语义。
+每条 rbt 命令使用私有临时配置，禁止自动发布/stamp/打开浏览器；Token 不进入 argv，日志脱敏。
+临时文件在 `globalStorageUri/jobs`，Linux/WSL 目录 `0700`、文件 `0600`，进程退出即清理。
+`.reviewboardrc` 是可执行 Python，扩展仅在受信任的文件系统工作区中启用。
 
-每条命令使用私有临时 `.reviewboardrc`：禁止自动 publish、自动 stamp 和浏览器打开，
-固定差异生成选项。token 不进入 argv；异常和日志会脱敏，临时配置在命令退出后删除。
-临时文件位于扩展 `globalStorageUri/jobs`，目录 `0700`、文件 `0600`（Linux/WSL）。
-工作区表单和待确认写操作保存在 VS Code workspaceState，按规范仓库路径区分；不写入源码。
+## 范围和写操作合同
 
-`.reviewboardrc` 可执行 Python，因此未信任工作区中扩展不启用。虚拟工作区不支持。
-已接受 RBTools 5+ 的版本入口，但本次兼容性验收仅覆盖 RBTools 7.0 / Review Board 7.0.6；
-公司的版本、SSO、证书/代理仍需试点验证。
+默认审核 merge-base(target, HEAD) → HEAD，显式 BASE 必须是 HEAD 祖先。
+包含 merge 的分支使用汇总 diff，保留侧分支和手工冲突解决的净改动，不改写本地历史。
+逐提交模式仅支持连续线性、无空提交的历史；更新已有单保持创建时的模式。
+工作区未提交内容排除；merge/rebase/cherry-pick 未结束时拒绝新建审核计划。
 
-## 开发与安装
+本地预览固定 HEAD/目标/BASE SHA、worktree/common-dir、Git/remote 指纹、工具/服务器版本、主 patch hash、
+服务器 repository ID 和旧单快照。上传前重查这些状态及登录用户；字段变化无需重新生成 patch。
+上传后核对字段、文件集合和服务端主 patch，保存成功与已发布分别显示。
+主 patch 比较仅去除 rbt 控制台额外附加的末尾换行。
 
-开发依赖 Node 22+、npm、Git；测试站点使用 Python 3.12，Git 核心测试使用 `python3` 生成隔离样例。
-Node 依赖由 package-lock.json 固定，开发入口在 lockfile 变化时执行 npm ci。
+审阅只写最新已发布、仍处于 pending 的版本；发布前重查版本和登录用户。
+行内评论使用服务器 diff-data 的虚拟行映射，实际源文件/目标文件行号不能直接传给 first_line。
+例如删除 B/C 后，目标文件第 2 行 D 对应虚拟行 4；没有精确映射的范围拒绝写入。
+服务器草稿被其他窗口修改时保留本地内容并要求重新载入；重新载入前保留一份本地备份。
+草稿含其他差异版本的评论时，必须先在网页处理，避免在当前版本下发布未核对的历史意见。
+保留并显示已有 body_bottom，保存/发布后核对 body、Ship It、评论内容、范围、filediff 和操作标记。
+API 评论合同参考 [Review Board diff comment 资源](https://www.reviewboard.org/docs/manual/latest/webapi/2.0/resources/review-diff-comment/)。
+
+提交和审阅均在写操作前持久化待确认记录；收到 ID 后立即保存。失败、取消或响应丢失时不自动重试，
+通过“检查服务器”回读并核对，部分完成则保留待确认状态。新单/评论标记用于识别响应丢失后的结果。
+只有用户人工核对后才能显式清除待确认记录。
+
+客户端快照/时间戳检查不是服务器原子 CAS，检查与写入之间仍有并发窗口。
+主 patch 已冻结并回读；完整 parent diff 上传包冻结尚未实现，父 diff 在固定 SHA/remote 下由 RBTools 生成，
+真实集成测试另外验证服务端重建结果。
+进程输出预算 64 MiB，快照单文件 16 MiB，列表最多 10,000 项；触限报错，不静默截断。
+
+## 开发和实现入口
+
+Node 22+、npm、Git；本地站点使用 Python 3.12，核心 Git 测试还用 Python 3 创建隔离样例。
+开发入口按 lockfile hash 执行 npm ci；普通编译先清理 build/extension，避免旧界面进入 VSIX。
 
 ```bash
-bash dev.sh prepare       # 安装依赖并编译到 build/extension
+bash dev.sh prepare       # 安装固定依赖并编译
 bash dev.sh watch         # 持续编译
-bash dev.sh test          # 核心测试
-bash dev.sh integration   # 自动确保本地站点就绪，运行 TypeScript 真实集成测试
-bash dev.sh host-smoke    # 真实 Extension Host、Webview、原生 diff、post/publish
-bash dev.sh package       # 生成 build/rbtflow-0.1.0.vsix
+bash dev.sh test          # 核心/仓库缓存/行映射
+bash dev.sh integration   # 确保本地服务就绪，真实提交和跨用户审阅
+bash dev.sh host-smoke    # 实际 VS Code Extension Host
+bash dev.sh package       # build/rbtflow-0.2.0.vsix
 ```
 
-在 VS Code 打开仓库根目录，F5 选择 **Run RBTFlow (local lab)**；任务自动 start 本地站点并编译，
-Development Host 打开 `build/workspace`。该配置为当前 Linux/WSL 环境设置 rbt PATH；
-实际部署按目标机器设置 `rbtflow.rbtPath`。本地服务账号见根 README。
-也可以通过 **Extensions: Install from VSIX** 安装开发包。当前没有执行 Marketplace 发布。
+F5 选择 **Run RBTFlow (local lab)**，自动启动本地站点并编译，然后打开 build/workspace。
+实际机器在仓库设置中指定 rbt。可用 **Extensions: Install from VSIX** 安装开发包，尚未执行 Marketplace 发布。
 
-Host 测试使用隔离的用户和扩展目录，不使用日常 VS Code 登录/profile。
-默认下载 VS Code 1.136.1 到 `build/vscode-test`；`VSCODE_EXECUTABLE_PATH` 可指定已有的 Electron 可执行文件。
-Linux 无 DISPLAY 时尝试 `xvfb-run`，缺失则明确报告 BLOCKED，不算测试通过。
-`RBTFLOW_EXTENSION_PATH` 可指向已解包的 VSIX 内 `extension/` 目录，对安装包中的实际文件运行相同验收。
-
-## 实现入口
-
-| 文件 | 职责 |
+| 入口 | 职责 |
 | --- | --- |
-| `src/extension.ts` | Git API、仓库发现、TreeView、命令、SecretStorage 和生命周期 |
-| `src/domain/model.ts` | 固定范围、审核字段、服务器快照、收据和待确认记录 |
-| `src/application/reviewSession.ts` | 预览、过期检查、post/publish、结果核对和恢复 |
-| `src/adapters/git.ts` | DAG/merge-base、worktree 身份、refs、文件变化、blob 快照 |
-| `src/adapters/process.ts` | 无 shell argv 调用，超时/取消、输出预算和进程组终止 |
-| `src/adapters/rbtools.ts` | RBTools/API、认证配置、草稿同步、字段与主 patch 回读 |
-| `src/views/reviewPanel.ts`、`media/review.*` | 审核表单与受约束的 host 消息协议 |
-| `src/views/snapshots.ts` | 原生 diff 使用的只读快照文件系统 |
-| `python/rbtflow_bridge.py` | 在 rbt 自己的 Python 环境执行的小型扩展命令 |
+| `src/extension.ts` | Git 仓库发现、原生视图注册、命令和生命周期 |
+| `src/application/repositoryStore.ts` | 仓库默认值、自己的草稿、持久化迁移 |
+| `src/application/reviewSession.ts` | 原有提交状态机、固定范围、post/publish 和恢复 |
+| `src/application/reviewBrowser.ts` | 远程审核元数据、版本、文件和自己的审阅草稿 |
+| `src/application/feedbackSession.ts` | 审阅写操作、最新版本检查、回读、恢复 |
+| `src/domain/model.ts`、`comparison.ts` | 提交与对比数据合同，虚拟行映射 |
+| `src/adapters/git.ts`、`process.ts`、`rbtools.ts` | Git DAG、无 shell 进程、RBTools/API/认证 |
+| `src/views/reviewSidebar.ts`、`reviewController.ts` | 侧边栏生命周期、按仓库会话、消息边界 |
+| `src/views/changesTree.ts`、`snapshots.ts`、`reviewComments.ts` | 原生更改、只读 diff、行内意见 |
+| `media/review.*` | 极简侧边栏表单，VS Code 主题、CSP、本地资源 |
+| `python/rbtflow_bridge.py` | 在 rbt 自己的解释器里读取配置/文件/行映射和精确写入草稿 |
 
-Python bridge 使用官方 `rbtools_commands` entry points 机制，经进程专属 PYTHONPATH 加载，
-没有向全局环境安装包或猜测 rbt 的 Python 解释器。它只提供实际服务器 URL、草稿字段替换和
-主 patch 哈希读取；图分析、状态机和界面仍由 TypeScript 负责。
+Python bridge 通过官方 rbtools_commands entry points，经进程专属 PYTHONPATH 加载；
+没有向全局 Python 安装包或猜测 rbt 的解释器。应用状态机与界面均在 TypeScript 中。
 
-## 提交合同与失败恢复
+## 验证边界和证据
 
-预览固定 HEAD/目标/BASE SHA、worktree/common-dir、远程引用和 Git 状态指纹、工具/服务器版本、
-主 patch hash、服务器 repository ID 和旧审核单快照。字段变化不要求重新生成 patch；
-仓库、范围、模式、审核单 ID 等变化使计划失效。
+本轮在本地 Review Board 7.0.6 / RBTools 7.0 / Git 2.53.0 / Node 26.7.0 / TypeScript 7.0.2 上验证。
+2026-11-16 已通过 10 项核心测试、4 组真实集成测试和 16 项真实 VS Code 1.136.1 Extension Host 检查。
+集成测试覆盖五类 Git 图、上传后完整 tree、字段清空、并发变动拒绝、跨用户权限、服务端 parent diff 重建、
+多 diff revision、删除行后的评论定位、Ship It 和两类写操作响应丢失恢复。
+Host 另验证真实 CSP 脚本渲染、原生 TreeView/diff/CommentController、实际 global Memento 恢复、
+查看他人不会修改自己的默认值、原生评论到服务器发布，以及新建时默认值沿用。
 
-post 前检查 Git、登录用户、旧单状态和服务器快照，重新生成 diff 并核对 hash。
-上传后明确同步所有表单字段，回读字段、文件集合和服务端主 patch；仅去除 `rbt diff`
-控制台额外附加的末尾换行后比较哈希。保存成功不意味着已发布。
-
-开始写操作前先持久化待确认记录；收到 ID 后立即记下。失败/取消不会自动重试。
-新草稿携带一次性标记以辅助找到“服务端已完成但客户端丢失响应”的请求。
-未注册的自定义字段只保存在草稿，发布时 Review Board 不会复制到公开审核单，因此发布恢复使用
-已经记录的审核单 ID。仅完成部分写入或服务器又被编辑时，保留待确认状态供检查，不擅自覆盖。
-
-客户端旧快照检查不是服务器原子 CAS；检查和写入之间仍有并发窗口。
-主 patch 已回读核对，parent diff 的完整上传包冻结仍未实现；父 diff 在固定 SHA/远程引用下交由
-RBTools 生成，集成测试另外验证了服务端实际重建。明确的成功返回和原始诊断都保留在日志中。
-
-单次进程输出预算为 64 MiB，原生快照单文件上限 16 MiB，diff 还受服务器报告的大小限制。
-触限会报错，不静默截断后继续提交。API 列表分页读取，上限 10,000 项时明确报错。
-
-## 验证范围
-
-本次运行了真实 VS Code 1.136.1 Extension Host，Webview 脚本在 CSP 下加载，确认实际渲染的文件数、
-保存/发布按钮状态和原生 diff 文档内容，再经同一 host 消息处理入口保存并发布本地审核单。
-这不是只用 vscode mock 的测试，也不等于完成手工视觉和键盘可用性验收。
-
-2026-11-16 验证结果：7 项核心测试、3 组真实集成测试、8 项 Extension Host 检查通过。
-Host 最后一轮使用 `build/vsix-check/extension`，来自生成的 VSIX 解包；额外检查运行文件与当前源码构建一致，
-包中只有 19 个发行文件，不含测试、source map、缓存、Node 依赖目录或 SQLite 数据。
-环境为 Git 2.53.0、Node 26.7.0、TypeScript 7.0.2、RBTools 7.0、Review Board 7.0.6。
-
-本机缺少桌面 DISPLAY/Xvfb，验证时将 Xvfb 及依赖临时解包至 `build/host-tools`，
-复用之前 Java 插件目录中的 VS Code Electron；没有安装系统包或修改该项目。
-这些临时测试进程已停止，本地 Review Board 保留运行。成功的集成测试会清理自己注册的临时 worktree，
-保留日志、patch 和报告；失败时保留工作树用于诊断。
+Host 使用隔离的用户/扩展目录。默认下载 VS Code 1.136.1，VSCODE_EXECUTABLE_PATH 可复用 Electron；
+无 DISPLAY 尝试 xvfb-run，缺失明确报告 BLOCKED。RBTFLOW_EXTENSION_PATH 可对已解包 VSIX 运行相同检查。
+本机验证将 Xvfb/依赖解包至 build/host-tools，复用 javavscode-terminal 的 Electron，没有修改该项目或安装系统包。
+可选 RBTFLOW_CDP_PORT 供测试窗口截图，人工检查了 300px 侧边栏的实际布局；这不代表所有主题、键盘和平台已验收。
 
 证据文件：
 
-- `build/test-core.log`：Git 图、worktree/rename/Unicode、字面 argv、取消/超时/输出限制、过期结果、凭据脱敏/清理。
-- `build/test-integration.log`：五类历史、上传 patch 应用后的完整 Git tree、发布后更新、字段清空、Git/服务器变动拒绝、响应丢失恢复。
-- `build/host/latest.json` 和 `build/test-host.log`：真实 Extension Host 与审核单链接。
-- `build/rbtflow-0.1.0.vsix`：供安装验证的开发包。
-- `build/package-validation.json`：发行文件数量与 VSIX 的 SHA-256。
+- `build/test-core-v2.log`：10 项核心/缓存/行映射测试。
+- `build/test-integration-v2.log`：原有三组真实提交回归。
+- `build/test-review-v2.log`：跨用户、远程对比、精确行内评论、审阅发布和丢失响应恢复。
+- `build/review-test-fixture.json`：为 Host 准备的另一作者审核单和预期服务端文件内容。
+- `build/host/latest.json`、`build/test-host-v2.log`：真实扩展宿主检查和审核收据。
+- `build/host/submit.png`、`build/host/review.png`：实际 Electron 窗口截图。
+- `build/rbtflow-0.2.0.vsix`、`build/package-validation-v2.json`：安装包、文件清单与 SHA-256。
 
-错误恢复测试包含明确的故障注入：实际完成服务端保存后，主动丢弃客户端返回，再新建会话读取
-持久化状态并核对服务器。它不能替代公司网络环境的所有故障测试。
-
-尚未提供实际 merge/land/push、未提交内容审核、任意不连续 commits 组合、全量上传包冻结。
-原生 Windows/macOS、公司环境、LFS/submodule/大仓库容量、手工视觉和所有快捷键流程尚未验收。
+目前仅覆盖已提交的 Git 文本代码、单个差异版本对比、顶层审阅意见/行内评论/Ship It。
+评论回复、issue 状态处理、附件/图片、interdiff、merge/land/push 仍需后续实现或网页操作。
+已接受 RBTools 5+ 入口，但公司的具体版本、SSO/代理/证书、Windows/macOS、LFS/submodule、大仓库容量
+和全快捷键流程尚未验收。成功测试清理自己注册的临时 worktree，失败保留诊断；本地服务数据和日志保留。

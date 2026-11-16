@@ -1,50 +1,238 @@
 {
   "name": "rbtflow",
   "displayName": "RBTFlow",
-  "description": "Preview Git changes and create or update Review Board reviews with RBTools.",
-  "version": "0.1.0",
+  "description": "Repository-scoped Review Board submission, comparison and code review in the VS Code sidebar.",
+  "version": "0.2.0",
   "publisher": "cossoledad",
   "license": "UNLICENSED",
   "private": true,
-  "repository": { "type": "git", "url": "https://github.com/cossoledad/RBTFlow.git" },
-  "engines": { "vscode": "^1.96.0" },
-  "categories": ["SCM Providers", "Other"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cossoledad/RBTFlow.git"
+  },
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
   "main": "./build/extension/extension.js",
-  "extensionKind": ["workspace"],
-  "extensionDependencies": ["vscode.git"],
-  "activationEvents": ["onStartupFinished"],
+  "extensionKind": [
+    "workspace"
+  ],
+  "extensionDependencies": [
+    "vscode.git"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "capabilities": {
-    "untrustedWorkspaces": { "supported": false, "description": "RBTools executes repository .reviewboardrc Python configuration." },
-    "virtualWorkspaces": { "supported": false, "description": "RBTFlow requires local Git and RBTools in the workspace extension host." }
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "RBTools executes repository .reviewboardrc Python configuration."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "RBTFlow requires local Git and RBTools in the workspace extension host."
+    }
   },
   "contributes": {
     "commands": [
-      { "command": "rbtflow.openReview", "title": "RBTFlow: 打开提交审核", "icon": "$(git-pull-request)" },
-      { "command": "rbtflow.refresh", "title": "RBTFlow: 刷新仓库", "icon": "$(refresh)" },
-      { "command": "rbtflow.setToken", "title": "RBTFlow: 设置服务器 API Token", "icon": "$(key)" },
-      { "command": "rbtflow.showLog", "title": "RBTFlow: 查看日志", "icon": "$(output)" }
+      {
+        "command": "rbtflow.openReview",
+        "title": "RBTFlow: 打开审核侧边栏",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "rbtflow.chooseRepository",
+        "title": "RBTFlow: 选择仓库",
+        "icon": "$(repo)"
+      },
+      {
+        "command": "rbtflow.settings",
+        "title": "RBTFlow: 仓库设置",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "rbtflow.newReview",
+        "title": "RBTFlow: 新建审核",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rbtflow.myReviews",
+        "title": "RBTFlow: 我的审核",
+        "icon": "$(account)"
+      },
+      {
+        "command": "rbtflow.openById",
+        "title": "RBTFlow: 按 ID 查看审核",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "rbtflow.refresh",
+        "title": "RBTFlow: 刷新仓库",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rbtflow.refreshComparison",
+        "title": "RBTFlow: 刷新对比",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rbtflow.openChange",
+        "title": "RBTFlow: 对比文件",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "rbtflow.showPatch",
+        "title": "RBTFlow: 查看原始差异",
+        "icon": "$(code)"
+      },
+      {
+        "command": "rbtflow.addComment",
+        "title": "加入审阅草稿",
+        "enablement": "!commentIsEmpty"
+      },
+      {
+        "command": "rbtflow.removeComment",
+        "title": "删除本地评论",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "rbtflow.setToken",
+        "title": "RBTFlow: 设置服务器 API Token",
+        "icon": "$(key)"
+      },
+      {
+        "command": "rbtflow.showLog",
+        "title": "RBTFlow: 查看日志",
+        "icon": "$(output)"
+      }
     ],
-    "viewsContainers": { "activitybar": [{ "id": "rbtflow", "title": "RBTFlow", "icon": "media/icon.svg" }] },
-    "views": { "rbtflow": [{ "id": "rbtflow.repositories", "name": "审核项目" }] },
-    "viewsWelcome": [{ "view": "rbtflow.repositories", "contents": "打开一个 Git 项目，选择仓库开始审核。\n[刷新仓库](command:rbtflow.refresh)" }],
-    "menus": { "view/title": [
-      { "command": "rbtflow.openReview", "when": "view == rbtflow.repositories", "group": "navigation@1" },
-      { "command": "rbtflow.refresh", "when": "view == rbtflow.repositories", "group": "navigation@2" },
-      { "command": "rbtflow.showLog", "when": "view == rbtflow.repositories", "group": "navigation@3" }
-    ] },
-    "configuration": { "title": "RBTFlow", "properties": {
-      "rbtflow.rbtPath": { "type": "string", "default": "rbt", "scope": "machine-overridable", "description": "RBTools executable on the machine running this workspace. No shell arguments." },
-      "rbtflow.serverUrl": { "type": "string", "default": "", "description": "Review Board URL. Empty uses the existing RBTools configuration." },
-      "rbtflow.commandTimeoutSeconds": { "type": "number", "default": 120, "minimum": 5, "maximum": 1800, "description": "Timeout for each RBTools operation. Interrupted writes require checking server state." }
-    } }
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rbtflow",
+          "title": "RBTFlow",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "rbtflow": [
+        {
+          "id": "rbtflow.review",
+          "name": "审核",
+          "type": "webview",
+          "initialSize": 360
+        },
+        {
+          "id": "rbtflow.changes",
+          "name": "更改",
+          "initialSize": 240
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "rbtflow.changes",
+        "contents": "预览本地更改，或按 ID 打开已提交的审核。\n[按 ID 打开](command:rbtflow.openById)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "rbtflow.chooseRepository",
+          "when": "view == rbtflow.review",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rbtflow.settings",
+          "when": "view == rbtflow.review",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rbtflow.newReview",
+          "when": "view == rbtflow.review",
+          "group": "navigation@3"
+        },
+        {
+          "command": "rbtflow.showLog",
+          "when": "view == rbtflow.review",
+          "group": "other"
+        },
+        {
+          "command": "rbtflow.refreshComparison",
+          "when": "view == rbtflow.changes",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rbtflow.showPatch",
+          "when": "view == rbtflow.changes",
+          "group": "navigation@2"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "rbtflow.addComment",
+          "when": "commentController == rbtflow && commentThreadIsEmpty",
+          "group": "inline"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "rbtflow.removeComment",
+          "when": "commentController == rbtflow && commentThread =~ /^[0-9a-f-]{36}$/",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "rbtflow.addComment",
+          "when": "false"
+        },
+        {
+          "command": "rbtflow.removeComment",
+          "when": "false"
+        },
+        {
+          "command": "rbtflow.openChange",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "RBTFlow",
+      "properties": {
+        "rbtflow.rbtPath": {
+          "type": "string",
+          "default": "rbt",
+          "scope": "machine-overridable",
+          "description": "RBTools executable on the machine running this workspace. No shell arguments."
+        },
+        "rbtflow.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Review Board URL. Empty uses the existing RBTools configuration."
+        },
+        "rbtflow.commandTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 1800,
+          "description": "Timeout for each RBTools operation. Interrupted writes require checking server state."
+        }
+      }
+    }
   },
   "scripts": {
-    "compile": "tsc -p .",
+    "compile": "node scripts/compile.cjs",
     "watch": "tsc -p . --watch",
-    "test": "npm run compile && node --test build/extension/test/core.test.js",
-    "test:integration": "npm run compile && node --test build/extension/test/integration.test.js",
+    "test": "npm run compile && node --test build/extension/test/core.test.js build/extension/test/repository.test.js",
+    "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js",
     "test:host": "npm run compile && node scripts/test-host.cjs",
-    "package": "npm run compile && vsce package --skip-license --out build/rbtflow-0.1.0.vsix",
+    "package": "npm run compile && vsce package --skip-license --out build/rbtflow-0.2.0.vsix",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
