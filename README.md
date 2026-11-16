@@ -9,7 +9,21 @@ VS Code 的 Review Board 审核扩展：原生 **Submit / Review / Changes** 三
 实际执行 merge/land/push 尚未实现。RBTools 是 `rbt` 客户端，Review Board 是服务端；
 扩展可连接现有服务，下面的本地站点仅用于开发，不是插件用户必须部署的后端。
 
-## 运行扩展
+## 安装扩展
+
+在 VS Code 扩展视图搜索 **ganjinbo.rbtflow**，或运行：
+
+```bash
+code --install-extension ganjinbo.rbtflow
+```
+
+Marketplace 标识为 [ganjinbo.rbtflow](https://marketplace.visualstudio.com/items?itemName=ganjinbo.rbtflow)。
+运行需要工作区机器上的 Git、RBTools 7+ 和可用的 Review Board 服务；安装成品扩展不需要 Node/npm。
+
+旧测试包 `cossoledad.rbtflow` 与此为不同扩展，请先卸载旧包再安装新版。
+旧扩展独立的缓存和 Token 不会自动搬迁，现有 `.reviewboardrc` / `rbt login` 仍可复用。
+
+## 本地开发与 VSIX
 
 在本项目根目录运行（开发构建需要 Node 22+、npm；Git 测试还使用 Python 3）：
 

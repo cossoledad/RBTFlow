@@ -3,7 +3,7 @@
   "displayName": "RBTFlow",
   "description": "Native VS Code views for Review Board submission, review and comparison.",
   "version": "0.3.0",
-  "publisher": "cossoledad",
+  "publisher": "ganjinbo",
   "license": "UNLICENSED",
   "private": true,
   "repository": {

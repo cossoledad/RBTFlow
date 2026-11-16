@@ -21,7 +21,8 @@ function leafCount(nodes: ChangeNode[]): number { return nodes.reduce((count, no
 
 export async function run(): Promise<void> {
     const checks: string[] = [], root = process.env.RBTFLOW_HOST_ROOT || labRoot;
-    const extension = vscode.extensions.getExtension<RBTFlowAPI>('cossoledad.rbtflow'); assert(extension);
+    const packageManifest = JSON.parse(await readFile(path.join(project, 'package.json'), 'utf8')) as { publisher: string; name: string };
+    const extension = vscode.extensions.getExtension<RBTFlowAPI>(`${packageManifest.publisher}.${packageManifest.name}`); assert(extension);
     const api = await extension.activate(); await vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');
     assert(api.roots().includes(root));
     const manifest = extension.packageJSON as { contributes: { views: { rbtflow: { id: string; type?: string }[] } } };
@@ -66,7 +67,12 @@ export async function run(): Promise<void> {
     const descriptionEditor = vscode.window.activeTextEditor!;
     await descriptionEditor.edit(edit => edit.replace(new vscode.Range(descriptionEditor.document.positionAt(0), descriptionEditor.document.positionAt(descriptionEditor.document.getText().length)), 'Native description'));
     await descriptionEditor.document.save();
-    await waitFor(() => !controller!.busy && controller!.browser.current?.details.description === 'Native description');
+    try { await waitFor(() => !controller!.busy && controller!.browser.current?.details.description === 'Native description'); }
+    catch (error) {
+        await writeFile(path.join(project, 'build/host/snapshot-drift.json'), JSON.stringify({ expected: controller.browser.current?.requestSnapshot,
+            observed: await controller.backend(remote.server).snapshot(id), error: String(controller.lastError) }, null, 2));
+        throw error;
+    }
     await descriptionEditor.edit(edit => edit.insert(descriptionEditor.document.positionAt(descriptionEditor.document.getText().length), '\n\nSecond save'));
     await descriptionEditor.document.save();
     await waitFor(() => !controller!.busy && controller!.browser.current?.details.description === 'Native description\n\nSecond save');

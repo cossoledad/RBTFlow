@@ -1,6 +1,7 @@
 **
 !package.json
 !README.md
+!CHANGELOG.md
 !docs/*.md
 !media/*.svg
 !python/rbtflow_bridge.py

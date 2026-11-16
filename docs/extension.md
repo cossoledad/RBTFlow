@@ -125,7 +125,8 @@ bash dev.sh host-smoke    # 原生 VS Code 控件验收，自动准备所需本�
 bash dev.sh package       # build/rbtflow-0.3.0.vsix
 ```
 
-F5 选择 Run RBTFlow (local lab)；实际安装使用 Extensions: Install from VSIX。没有 Marketplace 发布。
+F5 选择 Run RBTFlow (local lab)；成品扩展标识为 ganjinbo.rbtflow，也可使用 Extensions: Install from VSIX。
+发布者从旧测试包的 cossoledad 改为 ganjinbo，两者的扩展存储独立；发布步骤见 [Marketplace 发布](publishing.md)。
 Node 22+ / Git / RBTools；本地站点 Python 3.12。新提交信息解析器使用 RBTools 7 的 API，兼容性实测为
 RBTools 7.0 / Review Board 7.0.6；公司版本、SSO/代理/证书仍需试点。
 
