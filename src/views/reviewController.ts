@@ -10,6 +10,7 @@ import { RequestMetadata, requestFields, RequestSession, RequestWrite } from '..
 import { digest, PendingWrite, PublishValidationError, ReviewPlan, ReviewResource, serverUrl } from '../domain/model';
 import { DiffVersion, InlineDraft, RemoteComparison, ReviewFeedback, ReviewWrite } from '../domain/comparison';
 import { NativeInputs, pickRecipients, Recipients } from './nativeInputs';
+import { DiscussionSession } from '../application/discussionSession';
 
 interface FeedbackCache { feedback: ReviewFeedback; base: string; }
 interface LastRequest { id: number; server: string; }
@@ -24,6 +25,7 @@ export class ReviewController implements vscode.Disposable {
     readonly browser: ReviewBrowser;
     readonly feedbackSession: FeedbackSession;
     readonly requestSession: RequestSession;
+    readonly discussion: DiscussionSession;
     readonly store: RepositoryStore;
     form: FormData;
     feedback = emptyFeedback();
@@ -32,6 +34,9 @@ export class ReviewController implements vscode.Disposable {
     busy = false;
     lastError?: unknown;
     previewPatch?: Buffer;
+    connectionVersion = 0;
+    private readonly viewed = new vscode.EventEmitter<RemoteComparison>();
+    readonly onDidViewRequest = this.viewed.event;
     private refs: string[] = [];
     private localPreview?: ReviewPlan;
     private selected: 'local' | 'remote' = 'remote';
@@ -46,6 +51,7 @@ export class ReviewController implements vscode.Disposable {
             load: () => this.store.get<PendingWrite>('submissionPending'), save: value => this.store.set('submissionPending', value),
         });
         this.browser = new ReviewBrowser(server => this.backend(server));
+        this.discussion = new DiscussionSession(server => this.backend(server));
         this.feedbackSession = new FeedbackSession(server => this.backend(server), {
             load: () => this.store.get<ReviewWrite>('feedbackPending'), save: value => this.store.set('feedbackPending', value),
         });
@@ -150,7 +156,7 @@ export class ReviewController implements vscode.Disposable {
             if (!this.form.branch) { this.form.branch = this.form.targetRef.replace(/^refs\/remotes\//, '').replace(/^[^/]+\//, ''); }
             this.branch = plan.git.branch; this.localPreview = plan; this.selected = 'local';
             this.previewPatch = this.session.patch && Buffer.from(this.session.patch);
-            this.browser.clear(); this.feedback = emptyFeedback(); this.feedbackConflict = false; this.feedbackSession.receipt = undefined;
+            this.browser.clear(); this.discussion.clear(); this.feedback = emptyFeedback(); this.feedbackConflict = false; this.feedbackSession.receipt = undefined;
             await this.store.saveOwn(this.form);
             for (const warning of plan.git.warnings) { this.log.info(warning); }
             this.log.info(`${plan.git.files.length} files, ${plan.git.commits} commits, ${plan.git.merges} merges; ${plan.git.base} → ${plan.git.head}`);
@@ -179,6 +185,7 @@ export class ReviewController implements vscode.Disposable {
     }
     private async loadRemote(id: number, selection?: Pick<DiffVersion, 'scope' | 'revision'>, server = this.form.server, signal?: AbortSignal, verified?: ReviewFeedback): Promise<void> {
         const remote = await this.browser.open(server, id, selection, signal), cache = this.store.get<FeedbackCache>(this.feedbackKey(remote));
+        this.discussion.clear();
         const update = this.session.plan;
         if (update?.input.reviewId && (update.input.reviewId !== id || update.previous?.fingerprint !== remote.requestSnapshot?.fingerprint)) { this.session.invalidate(); }
         this.selected = 'remote'; this.feedbackSession.receipt = undefined;
@@ -187,9 +194,10 @@ export class ReviewController implements vscode.Disposable {
         await this.store.set('lastRequest', { id, server: remote.server });
     }
     async openRemote(id: number, selection?: Pick<DiffVersion, 'scope' | 'revision'>, server = this.form.server): Promise<boolean> {
-        return this.perform(`Open request #${id}`, 'review', signal => this.loadRemote(id, selection, server, signal));
+        const success = await this.perform(`Open request #${id}`, 'review', signal => this.loadRemote(id, selection, server, signal));
+        if (success && this.browser.current) { this.viewed.fire(this.browser.current); } return success;
     }
-    selectRemote(): void { if (!this.busy && this.browser.current) { this.selected = 'remote'; this.emit(); } }
+    selectRemote(): void { if (!this.busy && this.browser.current) { this.selected = 'remote'; this.emit(); this.viewed.fire(this.browser.current); } }
     async openById(): Promise<void> {
         if (this.busy) { return; }
         const value = await vscode.window.showInputBox({ title: 'Open review request', prompt: 'Request ID', validateInput: value => /^[1-9]\d*$/.test(value) ? undefined : 'Enter a positive ID' });
@@ -200,7 +208,7 @@ export class ReviewController implements vscode.Disposable {
             const context = await this.backend().context(signal), backend = this.backend(context.server), user = await backend.username(signal);
             const reviews = await backend.list<ReviewResource>('/review-requests/', 'review_requests', { 'from-user': user, status: 'all' }, signal);
             const chosen = await vscode.window.showQuickPick(reviews.sort((a, b) => b.id - a.id).map(review => ({ label: `#${review.id} ${review.summary || 'Draft'}`, description: review.status, id: review.id })), { title: 'My requests' });
-            if (chosen) { await this.loadRemote(chosen.id, undefined, context.server, signal); }
+            if (chosen) { await this.loadRemote(chosen.id, undefined, context.server, signal); this.viewed.fire(this.browser.current!); }
         });
     }
     async chooseVersion(): Promise<void> {
@@ -329,7 +337,7 @@ export class ReviewController implements vscode.Disposable {
         return this.perform(publish ? 'Publish review' : 'Save review', 'review', async signal => {
             const remote = this.browser.current; if (!remote || this.feedbackConflict) { throw new Error('Reload the server review draft first.'); }
             const receipt = publish ? await this.feedbackSession.publish(remote, this.feedback, signal) : await this.feedbackSession.save(remote, this.feedback, signal);
-            if (receipt.published) { await this.store.set(this.feedbackKey(remote), undefined); this.feedback = emptyFeedback(); }
+            if (receipt.published) { await this.store.set(this.feedbackKey(remote), undefined); this.feedback = emptyFeedback(); this.discussion.clear(); }
             else { await this.cacheFeedback(); }
         });
     }
@@ -378,6 +386,8 @@ export class ReviewController implements vscode.Disposable {
             { label: 'RBTools path', value: 'rbtPath', description: this.backend().options.executable },
             { label: 'Timeout', value: 'timeout', description: `${(this.backend().options.timeoutMs ?? 120_000) / 1000}s` },
             { label: 'API token', value: 'token', description: 'SecretStorage' },
+            { label: 'Notifications', value: 'notifications', description: (this.store.settings().notificationsEnabled ?? this.config().get('notifications.enabled', true)) ? 'On' : 'Off' },
+            { label: 'Inbox interval', value: 'pollInterval', description: `${this.store.settings().pollIntervalSeconds ?? this.config().get('notifications.pollIntervalSeconds', 60)}s` },
         ], { title: 'Repository settings' }))?.value;
         if (!key) { return; }
         await this.perform('Update repository settings', 'submit', async signal => {
@@ -401,9 +411,16 @@ export class ReviewController implements vscode.Disposable {
             } else if (key === 'token') {
                 const server = await vscode.commands.executeCommand<string>('rbtflow.setToken', this.form.server);
                 if (server) { if (server !== this.form.server) { this.form.repositoryId = null; } this.form.server = server; }
+            } else if (key === 'notifications') {
+                const value = await vscode.window.showQuickPick([{ label: 'On', value: true }, { label: 'Off', value: false }], { title: 'Review notifications' });
+                if (value) { await this.store.set('settings', { ...this.store.settings(), notificationsEnabled: value.value }); }
+            } else if (key === 'pollInterval') {
+                const value = await vscode.window.showInputBox({ title: 'Inbox interval (seconds)', value: String(this.store.settings().pollIntervalSeconds ?? 60),
+                    validateInput: value => !Number.isSafeInteger(Number(value)) || Number(value) < 30 || Number(value) > 3600 ? 'Use 30–3600 seconds' : undefined });
+                if (value !== undefined) { await this.store.set('settings', { ...this.store.settings(), pollIntervalSeconds: Number(value) }); }
             }
-            this.session.invalidate(); await this.store.saveOwn(this.form);
+            this.session.invalidate(); this.connectionVersion++; this.discussion.clear(); await this.store.saveOwn(this.form);
         });
     }
-    dispose(): void { this.cancel(); this.session.invalidate(); this.browser.clear(); this.changed.dispose(); }
+    dispose(): void { this.cancel(); this.session.invalidate(); this.browser.clear(); this.discussion.clear(); this.viewed.dispose(); this.changed.dispose(); }
 }

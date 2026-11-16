@@ -1,17 +1,18 @@
-# RBTFlow 0.3.0
+# RBTFlow 0.4.0
 
 全部交互使用 VS Code 原生控件，默认简短英文。没有 Webview、HTML 输入框、select 或自绘折叠区域。
 运行时复用工作区机器上的 Git/RBTools，连接现有 Review Board；本地站点只供开发，不使用 Docker。
 
-## 三个原生视图
+## 原生视图
 
 | 视图 | 职责 | 输入方式 |
 | --- | --- | --- |
 | Submit | 当前分支、目标主线、审批人/组、Bug、提交信息；预览、生成新草稿 | Quick Pick、Input Box、原生编辑器 |
+| Inbox | 当前连接的待审请求、未读优先、原生通知、阅读状态 | TreeView、原生通知、上下文菜单 |
 | Review | 选中的服务器审核单：版本、元数据、发布、更新差异、审阅、浏览器、恢复 | Quick Pick、Input Box、原生编辑器、原生复选框/评论 |
 | Changes | 当前预览或选中审核单的文件，目录树/列表切换、原生 diff、只读原始 patch | 原生 TreeView / readonly FileSystemProvider |
 
-三个视图使用 VS Code 自身的折叠、菜单和拖放，可移到 Panel。多根工作区可在 Submit 工具栏切换仓库。
+四个视图使用 VS Code 自身的折叠、菜单和拖放，可移到 Panel。多根工作区可在 Submit 工具栏切换仓库。
 工具栏命令可通过 hover 查看英文名称，也可从命令面板执行。
 
 **常见提交**：在 Submit 选择 Target / Reviewers / Bugs → Preview Changes → 在 Changes 检查 → Create Draft。
@@ -36,8 +37,29 @@ Update Request Diff 第一次生成当前分支的更新预览，在 Changes 检
 
 Comment 使用原生编辑器，Ctrl+S 保存本地总体意见；Ship It 是原生 TreeView 复选框。
 行内评论从原生 diff 行号处添加。Save Review 保存服务器审阅草稿，Publish Review 再独立发布。
-本地未保存评论可在原生线程上删除；已保存评论的修改/删除、回复、issue 等仍使用网页。
+本地未保存评论可在原生线程上删除；已保存评论的修改/删除、回复写入、issue 状态操作仍使用网页。
 描述和评论编辑临时文档位于扩展私有 inputs 目录，目录 0700、文件 0600（Linux/WSL），不写入源码。
+
+## 评论阅读与待审通知
+
+Review → Comments 是原生可展开的评论列表，按审阅人/回复分组；包含公开总体意见的头尾、general/diff/file-attachment/screenshot 评论和公开回复。
+显示作者、时间、Ship It、文件/差异版本和 issue 状态。点击项目打开只读全文，View All Comments 读取完整公开讨论，保留多行内容。
+先读取审阅列表，展开时读取对应评论/回复，使用已有 RBTools 认证和分页/容量限制；失败记录日志并允许 Refresh Comments 重试。
+私有审阅和未发布回复不显示。附件/截图只显示评论文字，不下载图片或自动打开评论中的链接。
+行内评论的 Open Comment in Diff 使用 filediff ID、版本和服务器虚拟行映射定位历史文件；interdiff 评论只读，不推测行位置。
+历史文件元数据读取失败不隐藏评论正文，会标识 File unavailable。
+
+Inbox 只列当前连接中直接或通过审批组分配给当前登录用户的公开 pending 请求，排除本人提交、仅加星和已关闭请求。
+范围是该服务器的待审列表，不限于当前 Git 仓库；多根工作区跟随当前选中仓库的连接，后台不并行扫描其他服务器。
+自动刷新默认每 60 秒，范围 30–3600 秒，可在 Repository Settings 或 VS Code 配置中关闭/调整；每仓库设置优先。
+第一次同步静默，之后的新分配或发布内容变化合并为一次原生通知；请求标题/说明/目标/最新 diff 等形成指纹，仅活动时间变化不会重新提醒。
+网络或认证失败保留已知列表、显示简短离线提示并写 Output，失败不会生成空列表或虚假通知；切换连接时清除旧界面并重新静默同步。
+这是工作区打开期间的轮询，不是服务端推送，也不会在 VS Code 退出后接收通知。
+
+未读优先，Inbox badge 显示数量；已读项目使用原生淡色装饰。成功显式打开最新已发布版本才自动标记已读，自动恢复上次页面不代替阅读。
+支持 Mark as Read / Unread 和 Mark All as Read；标记绑定实际看到的内容版本，轮询与打开并发时不把未看到的新版本读掉。
+阅读记录保存在 globalState，按服务器 + 登录账号隔离，在同一扩展 profile/宿主内跨仓库共享；不写入服务器，也不与浏览器阅读状态同步。
+阅读不代表 Ship It；审批仍使用 Review 原有的意见、Ship It、Save Review / Publish Review 流程。
 
 ## 发布失败与日志
 
@@ -70,6 +92,8 @@ Comment 使用原生编辑器，Ctrl+S 保存本地总体意见；Ship It 是原
 | 默认值 | 服务器/仓库 ID、目标主线、BASE、模式、审批人/组、Bug、分支标签 |
 | 提交信息 | 当前本地草稿、绑定 HEAD 的自定义标题/说明；生成后清空一次性内容 |
 | 工具 | 每仓库 rbt 路径和超时，未设置则用 VS Code 配置 |
+| 通知设置 | 每仓库开关和轮询间隔，未设置则用 VS Code 配置 |
+| Inbox 已读/提醒 | 服务器 + 登录账号 + 请求内容指纹；同一 profile/宿主共享 |
 | Review 导航 | 服务器 + 单号，重开重新读取服务器内容 |
 | 审阅草稿 | 仓库 + 服务器 + 登录用户 + 请求 + 差异 ID，保存总体意见/Ship It/本地行内评论 |
 | Changes | 每仓库 Tree / List；折叠交由原生 TreeView 管理 |
@@ -85,6 +109,8 @@ Comment 使用原生编辑器，Ctrl+S 保存本地总体意见；Ship It 是原
 | rbtflow.rbtPath | rbt | 工作区机器的 executable，不接受 shell 参数 |
 | rbtflow.serverUrl | 空 | 仓库没有缓存时的默认值，空使用 RBTools 配置 |
 | rbtflow.commandTimeoutSeconds | 120 | 单条命令超时，5–1800 秒 |
+| rbtflow.notifications.enabled | true | 待审列表自动刷新和内容更新通知 |
+| rbtflow.notifications.pollIntervalSeconds | 60 | 刷新间隔，30–3600 秒 |
 
 兼容 rbt login 和已有证书配置，保留实际配置 URL 及代理前缀；Token 不进入 argv，日志脱敏。
 每条 rbt 命令有私有临时配置，禁止自动发布/stamp/打开浏览器，退出删除。
@@ -119,10 +145,10 @@ FeedbackSession 只审阅最新已发布版本。行内评论映射使用服务�
 ```bash
 bash dev.sh prepare       # 固定 Node 依赖、清理旧产物、编译
 bash dev.sh watch
-bash dev.sh test          # 11 项核心/缓存/文件树/行映射
+bash dev.sh test          # 核心、缓存、通知并发/隔离、评论读取
 bash dev.sh integration   # 真实提交、跨用户审阅、服务器草稿和发布恢复
 bash dev.sh host-smoke    # 原生 VS Code 控件验收，自动准备所需本地数据
-bash dev.sh package       # build/rbtflow-0.3.0.vsix
+bash dev.sh package       # build/rbtflow-0.4.0.vsix
 ```
 
 F5 选择 Run RBTFlow (local lab)；成品扩展标识为 ganjinbo.rbtflow，也可使用 Extensions: Install from VSIX。
@@ -133,7 +159,8 @@ RBTools 7.0 / Review Board 7.0.6；公司版本、SSO/代理/证书仍需试点�
 | 入口 | 职责 |
 | --- | --- |
 | src/extension.ts | Git 发现、原生命令、LogOutputChannel、生命周期 |
-| src/views/reviewSidebar.ts | 三视图协调、原生行项目/复选框、对比、浏览器归属 |
+| src/views/reviewSidebar.ts / nativeTree.ts | 原生视图协调、行项目/复选框、对比、浏览器归属 |
+| src/views/inboxView.ts / discussionTree.ts | 收件箱/通知/已读装饰、延迟加载的评论树 |
 | src/views/reviewController.ts | 每仓库动作、Submit→Review 交接、Git 默认信息、恢复 |
 | src/views/nativeInputs.ts | 原生搜索多选框、短输入/多行编辑器支持 |
 | src/views/changesTree.ts / src/domain/fileTree.ts | 目录树/列表，保留原文件索引和评论身份 |
@@ -142,22 +169,26 @@ RBTools 7.0 / Review Board 7.0.6；公司版本、SSO/代理/证书仍需试点�
 | src/application/reviewSession.ts | 固定范围、上传、旧发布状态兼容恢复 |
 | src/application/requestSession.ts | 服务器页面编辑、发布、结构化拒绝和 journal 恢复 |
 | src/application/reviewBrowser.ts / feedbackSession.ts | 远程版本、审阅写操作 |
+| src/application/inboxSession.ts / discussionSession.ts | 待审 API、串行本地阅读记录、公开评论/回复读取 |
+| src/domain/inbox.ts / discussion.ts | 内容指纹/阅读版本、评论身份/只读文档 |
 | src/adapters / python/rbtflow_bridge.py | Git、进程、RBTools/认证及精确服务器操作 |
 
 2026-11-16 在 Git 2.53.0 / Node 26.7.0 / TypeScript 7.0.2 / VS Code 1.136.1 上验证。
-11 项核心、5 组真实集成（其中新增服务器请求测试单独记录）、14 项真实 Extension Host 检查。
+0.4.0 验证覆盖 16 项核心检查、6 组真实集成和 18 项真实 Extension Host 检查。
 Host 使用隔离 profile 和带真实嵌套/Unicode 文件的临时 worktree，覆盖原生多选框确认审批人后发布、
 Git 默认信息、草稿交接、服务器说明连续保存、目录树/列表、readonly patch 原生打字/写入拒绝、
-原生编辑器/复选框/评论、缓存恢复及另一作者的审阅发布。
+原生编辑器/复选框/评论、缓存恢复及另一作者的审阅发布；新增公开评论/四类回复只读阅读、
+历史版本精确定位、静默同步、通知去重、更新重新未读、点击阅读和批量已读。
 
 Host 默认下载 VS Code 1.136.1，VSCODE_EXECUTABLE_PATH 可指定已有 Electron；无 DISPLAY 尝试 xvfb-run，
 缺失报告 BLOCKED。RBTFLOW_EXTENSION_PATH 支持对 VSIX 解包文件验收；RBTFLOW_CDP_PORT 为可选测试截图端口。
 本机仅临时解包 Xvfb/依赖，复用 javavscode-terminal 的 Electron，没有改动该项目或安装系统包。
 
-证据：build/test-core-v3.log、build/test-integration-v3.log、build/test-request-v3.log、
-build/test-host-v3.log、build/host/latest.json、build/package-validation-v3.json。
-实际窗口截图：build/host/reviewers.png、review.png、submit.png。
+证据：build/test-v4-core.log、build/test-v4-integration.log（旧功能 5 组通过，新增用例首次认证夹具失败）、
+build/test-v4-collaboration.log（修正本地测试账号夹具后专项复验）、build/test-v4-host.log、
+build/host/latest.json、build/package-validation-v4.json。
+实际窗口截图：build/host/reviewers.png、review.png、submit.png、comments.png、inbox.png。
 成功测试清理自己的 worktree，失败保留诊断。本地站点保留运行，测试显示进程结束后关闭。
 
-尚未覆盖评论回复、issue 生命周期、附件/图片、interdiff、merge/land/push、未提交内容审核；
+尚未实现回复写入、issue 生命周期操作、附件上传/图片预览、interdiff 对比、merge/land/push、未提交内容审核；
 Windows/macOS、所有主题/快捷键、公司服务兼容和大仓库容量未完成验收。

@@ -1,10 +1,10 @@
 # RBTFlow
 
-VS Code 的 Review Board 审核扩展：原生 **Submit / Review / Changes** 三个折叠视图，
+VS Code 的 Review Board 审核扩展：原生 **Submit / Inbox / Review / Changes** 四个折叠视图，
 使用原生 Quick Pick、Input Box、编辑器、复选框、diff 和行内评论，没有自绘表单。
 审批人、bug 号、分支和工具等默认配置按仓库保存。
 
-**0.3.0 按“预览和生成草稿 → 管理服务器审阅 → 查看更改”分工，界面采用简短英文。**
+**0.4.0 增加评论阅读、待审收件箱、更新通知和已读状态，界面采用简短英文。**
 包含 merge 的分支默认使用汇总 diff，保留 Git 历史。
 实际执行 merge/land/push 尚未实现。RBTools 是 `rbt` 客户端，Review Board 是服务端；
 扩展可连接现有服务，下面的本地站点仅用于开发，不是插件用户必须部署的后端。
@@ -29,14 +29,14 @@ Marketplace 标识为 [ganjinbo.rbtflow](https://marketplace.visualstudio.com/it
 
 ```bash
 bash dev.sh prepare   # 安装 lockfile 中的 Node 依赖并编译
-bash dev.sh package   # 生成 build/rbtflow-0.3.0.vsix
+bash dev.sh package   # 生成 build/rbtflow-0.4.0.vsix
 ```
 
 VS Code 使用“Extensions: Install from VSIX”安装该文件，或在本仓库按 F5，选择
 `Run RBTFlow (local lab)`。F5 会准备本地服务并在示例项目中运行扩展。
 
 点击活动栏的 RBTFlow 图标，或执行 **RBTFlow: Open RBTFlow**。
-三个视图均可通过 VS Code 原生菜单/拖放移至下方 Panel。
+所有视图均可通过 VS Code 原生菜单/拖放移至下方 Panel。
 
 1. **Submit**：选择 Target、Reviewers 和 Bugs；标题/说明默认按 RBTools 的 Git 提交解析器生成，点 Message 可调整。
 2. 视图工具栏 **Preview Changes** 生成固定预览，**Create Draft** 上传；创建后自动交给 Review，Submit 准备下一次提交。
@@ -44,6 +44,16 @@ VS Code 使用“Extensions: Install from VSIX”安装该文件，或在本仓�
 4. 发布前若缺少审批人，会先打开原生多选框；确定的校验失败不会被误标为“结果未知”。旧的待确认发布会回读并恢复草稿状态。
 5. 在原生 diff 添加评论；Comment 使用原生编辑器，Ctrl+S 保存本地意见，勾选 Ship It，然后 Save Review / Publish Review。
 6. **Changes**：显示当前预览或选中审阅的文件，可切换 Tree / List；View Raw Diff 始终只读。
+
+**Inbox** 汇总当前服务器中直接或通过审批组分配给自己的待审请求；点击即可查看并使用现有 Ship It / Publish Review。
+已读项使用淡色，未读项优先排列并显示数量；支持 Mark as Read / Unread 和 Mark All as Read。
+阅读状态按服务器和账号保存在本机扩展 profile 中，重启后保留；已读不代表批准。
+默认每 60 秒轮询，第一次同步静默，之后的新请求或发布内容更新使用原生通知提醒。
+只在 VS Code 工作区打开期间轮询当前仓库所用的连接；可以在 Repository Settings 调整间隔或关闭自动刷新，手动 Refresh Inbox 仍可用。
+
+**Review → Comments** 按审阅人和回复折叠显示所有已发布的总体意见、行内评论、附件/截图评论文字和问题状态。
+点击评论在只读原生编辑器中阅读，View All Comments 查看全文；行内评论可用 Open Comment in Diff 跳到相应历史版本和行。
+当前提供阅读功能，回复写入、问题状态操作和图片查看仍使用 Review 的浏览器入口。
 
 服务器地址从现有 RBTools 配置读取；服务器仓库、BASE、审核模式、工具路径和超时均在齿轮 Repository Settings 中。
 普通配置和草稿保存在扩展存储，重开同一仓库自动沿用；新建审核保留审批人等默认值，清空单号、标题和说明。

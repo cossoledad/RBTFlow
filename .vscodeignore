@@ -4,9 +4,10 @@
 !CHANGELOG.md
 !docs/*.md
 !media/*.svg
+!media/*.png
 !python/rbtflow_bridge.py
-!python/rbtflow_bridge-0.3.0.dist-info/METADATA
-!python/rbtflow_bridge-0.3.0.dist-info/entry_points.txt
+!python/rbtflow_bridge-0.4.0.dist-info/METADATA
+!python/rbtflow_bridge-0.4.0.dist-info/entry_points.txt
 !build/extension/extension.js
 !build/extension/adapters/*.js
 !build/extension/application/*.js

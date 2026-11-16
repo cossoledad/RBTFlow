@@ -26,6 +26,18 @@ async function ensureReviewFixture() {
     child.on('exit', code => code === 0 ? resolve() : reject(new Error('Review fixture preparation failed')));
   });
 }
+async function ensureCollaborationFixture() {
+  try {
+    const fixture = JSON.parse(await fs.readFile(path.join(root, 'build/collaboration-fixture.json'), 'utf8'));
+    const headers = { Authorization: `Basic ${Buffer.from('admin:rbtflow-local').toString('base64')}` };
+    const data = await fetch(`http://127.0.0.1:8080/api/review-requests/${fixture.inboxRequestId}/`, { headers }).then(response => response.json());
+    if (data.review_request?.public && data.review_request.status === 'pending' && data.review_request.target_people.some(person => person.title === 'admin')) return;
+  } catch { /* Fresh labs prepare their own public discussion and incoming request. */ }
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--test', path.join(root, 'build/extension/test/collaboration.test.js')], { cwd: root, stdio: 'inherit' });
+    child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error('Collaboration fixture preparation failed')));
+  });
+}
 async function main() {
   const resultDir = path.join(root, 'build/host');
   await fs.mkdir(resultDir, { recursive: true });
@@ -40,6 +52,7 @@ async function main() {
     return;
   }
   await ensureReviewFixture();
+  await ensureCollaborationFixture();
   const dir = await fs.mkdtemp(path.join(resultDir, 'run-'));
   const workspace = path.join(dir, 'workspace');
   await git(['worktree', 'add', '--detach', workspace, 'feature/merged']);
@@ -53,6 +66,7 @@ async function main() {
   await fs.mkdir(path.join(user, 'User'), { recursive: true });
   await fs.writeFile(path.join(user, 'User/settings.json'), JSON.stringify({
     'rbtflow.rbtPath': path.join(root, 'build/venv/bin/rbt'),
+    'rbtflow.notifications.enabled': false,
     'telemetry.telemetryLevel': 'off', 'update.mode': 'none', 'git.autofetch': false,
     'workbench.startupEditor': 'none', 'window.restoreWindows': 'none',
   }));

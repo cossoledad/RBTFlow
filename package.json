@@ -1,8 +1,8 @@
 {
   "name": "rbtflow",
   "displayName": "RBTFlow",
-  "description": "Native VS Code views for Review Board submission, review and comparison.",
-  "version": "0.3.0",
+  "description": "Native Review Board submission, comments, review inbox and diffs in VS Code.",
+  "version": "0.4.0",
   "publisher": "ganjinbo",
   "license": "UNLICENSED",
   "private": true,
@@ -172,6 +172,46 @@
         "command": "rbtflow.clearRecovery",
         "title": "RBTFlow: Clear Recovery Record",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "rbtflow.showDiscussion",
+        "title": "RBTFlow: View All Comments",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "rbtflow.refreshDiscussion",
+        "title": "RBTFlow: Refresh Comments",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rbtflow.openCommentDiff",
+        "title": "RBTFlow: Open Comment in Diff",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "rbtflow.refreshInbox",
+        "title": "RBTFlow: Refresh Inbox",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rbtflow.openInboxRequest",
+        "title": "RBTFlow: Open Inbox Request",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "rbtflow.markInboxRead",
+        "title": "RBTFlow: Mark as Read",
+        "icon": "$(mail-read)"
+      },
+      {
+        "command": "rbtflow.markInboxUnread",
+        "title": "RBTFlow: Mark as Unread",
+        "icon": "$(mail)"
+      },
+      {
+        "command": "rbtflow.markAllInboxRead",
+        "title": "RBTFlow: Mark All as Read",
+        "icon": "$(check-all)"
       }
     ],
     "viewsContainers": {
@@ -189,6 +229,11 @@
           "id": "rbtflow.submit",
           "name": "Submit",
           "initialSize": 160
+        },
+        {
+          "id": "rbtflow.inbox",
+          "name": "Inbox",
+          "initialSize": 180
         },
         {
           "id": "rbtflow.review",
@@ -214,6 +259,10 @@
       {
         "view": "rbtflow.changes",
         "contents": "Preview changes or select a review request."
+      },
+      {
+        "view": "rbtflow.inbox",
+        "contents": "No assigned requests.\n[Refresh inbox](command:rbtflow.refreshInbox)"
       }
     ],
     "menus": {
@@ -322,6 +371,16 @@
           "command": "rbtflow.clearRecovery",
           "when": "view == rbtflow.review && rbtflow.hasPending && !rbtflow.busy",
           "group": "other@6"
+        },
+        {
+          "command": "rbtflow.refreshInbox",
+          "when": "view == rbtflow.inbox",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rbtflow.markAllInboxRead",
+          "when": "view == rbtflow.inbox",
+          "group": "navigation@2"
         }
       ],
       "comments/commentThread/context": [
@@ -362,6 +421,49 @@
         {
           "command": "rbtflow.clearRecovery",
           "when": "rbtflow.hasPending && !rbtflow.busy"
+        },
+        {
+          "command": "rbtflow.openInboxRequest",
+          "when": "false"
+        },
+        {
+          "command": "rbtflow.markInboxRead",
+          "when": "false"
+        },
+        {
+          "command": "rbtflow.markInboxUnread",
+          "when": "false"
+        },
+        {
+          "command": "rbtflow.openCommentDiff",
+          "when": "false"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "rbtflow.markInboxRead",
+          "when": "view == rbtflow.inbox && viewItem == rbtflow.inboxUnread",
+          "group": "inline@1"
+        },
+        {
+          "command": "rbtflow.markInboxUnread",
+          "when": "view == rbtflow.inbox && viewItem == rbtflow.inboxRead",
+          "group": "inline@1"
+        },
+        {
+          "command": "rbtflow.openCommentDiff",
+          "when": "view == rbtflow.review && viewItem == rbtflow.diffComment",
+          "group": "inline@1"
+        },
+        {
+          "command": "rbtflow.refreshDiscussion",
+          "when": "view == rbtflow.review && viewItem == rbtflow.discussion",
+          "group": "inline@1"
+        },
+        {
+          "command": "rbtflow.showDiscussion",
+          "when": "view == rbtflow.review && viewItem == rbtflow.discussion",
+          "group": "inline@2"
         }
       ]
     },
@@ -385,6 +487,18 @@
           "minimum": 5,
           "maximum": 1800,
           "description": "Timeout for each RBTools operation. Interrupted writes require checking server state."
+        },
+        "rbtflow.notifications.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh assigned reviews and notify about new requests or published content updates. The first sync is silent."
+        },
+        "rbtflow.notifications.pollIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 30,
+          "maximum": 3600,
+          "description": "Seconds between inbox refreshes. Repository Settings can override this value."
         }
       }
     }
@@ -392,17 +506,20 @@
   "scripts": {
     "compile": "node scripts/compile.cjs",
     "watch": "tsc -p . --watch",
-    "test": "npm run compile && node --test build/extension/test/core.test.js build/extension/test/repository.test.js",
-    "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js build/extension/test/request.test.js",
+    "test": "npm run compile && node --test build/extension/test/core.test.js build/extension/test/repository.test.js build/extension/test/collaboration-unit.test.js",
+    "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js build/extension/test/request.test.js build/extension/test/collaboration.test.js",
     "test:host": "npm run compile && node scripts/test-host.cjs",
-    "package": "vsce package --skip-license --out build/rbtflow-0.3.0.vsix",
-    "vscode:prepublish": "npm run compile"
+    "package": "vsce package --skip-license --out build/rbtflow-0.4.0.vsix",
+    "vscode:prepublish": "npm run icon && npm run compile",
+    "icon": "node scripts/icon.cjs"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^22.0.0",
     "@types/vscode": "1.96.0",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "4.1.1",
     "typescript": "7.0.2"
-  }
+  },
+  "icon": "media/logo.png"
 }

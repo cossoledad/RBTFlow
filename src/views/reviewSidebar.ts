@@ -7,28 +7,12 @@ import { SnapshotFiles } from './snapshots';
 import { ChangeItem, ChangesLayout, ChangesTree } from './changesTree';
 import { ReviewComments } from './reviewComments';
 import { NativeInputs } from './nativeInputs';
+import { Action, NativeItem, NativeSection } from './nativeTree';
+import { DiscussionTarget, DiscussionTree } from './discussionTree';
+import { InboxItem, InboxTarget, InboxView } from './inboxView';
+export { Action, NativeItem } from './nativeTree';
 
-export interface Action { root: string; section: 'submit' | 'review'; action: string; }
-export class NativeItem extends vscode.TreeItem {
-    constructor(readonly key: string, label: string, description: string, icon: string, readonly action?: Action) {
-        super(label); this.description = description; this.iconPath = new vscode.ThemeIcon(icon); this.id = `${action?.root ?? ''}:${key}`;
-        if (action) { this.command = { command: 'rbtflow.run', title: label, arguments: [action] }; }
-    }
-}
-class Section implements vscode.TreeDataProvider<NativeItem>, vscode.Disposable {
-    private readonly changed = new vscode.EventEmitter<void>();
-    readonly onDidChangeTreeData = this.changed.event;
-    readonly view: vscode.TreeView<NativeItem>;
-    constructor(id: string, private readonly items: () => NativeItem[]) {
-        this.view = vscode.window.createTreeView(id, { treeDataProvider: this, manageCheckboxStateManually: true });
-    }
-    getChildren(): NativeItem[] { return this.items(); }
-    getTreeItem(item: NativeItem): vscode.TreeItem { return item; }
-    refresh(): void { this.changed.fire(); }
-    dispose(): void { this.view.dispose(); this.changed.dispose(); }
-}
-
-/** Three native views. There is no embedded browser, form, or DOM state. */
+/** Native views only. There is no embedded browser, form, or DOM state. */
 export class ReviewSidebar implements vscode.Disposable {
     private readonly controllers = new Map<string, ReviewController>();
     private readonly initializing = new Map<string, Promise<ReviewController>>();
@@ -37,8 +21,10 @@ export class ReviewSidebar implements vscode.Disposable {
     private comparisonId = '';
     private feedbackFingerprint = '';
     readonly comments: ReviewComments;
-    readonly submit: Section;
-    readonly review: Section;
+    readonly submit: NativeSection;
+    readonly review: NativeSection;
+    readonly discussion: DiscussionTree;
+    readonly inbox: InboxView;
     private readonly inputs: NativeInputs;
     private readonly subscriptions: vscode.Disposable[] = [];
     constructor(private readonly context: vscode.ExtensionContext, private readonly git: GitAdapter,
@@ -46,8 +32,10 @@ export class ReviewSidebar implements vscode.Disposable {
                 private readonly log: vscode.LogOutputChannel, private readonly roots: () => string[]) {
         this.inputs = new NativeInputs(context.globalStorageUri.fsPath, log);
         this.comments = new ReviewComments(snapshots, () => this.current);
-        this.submit = new Section('rbtflow.submit', () => this.submitItems());
-        this.review = new Section('rbtflow.review', () => this.reviewItems());
+        this.discussion = new DiscussionTree(() => this.current, snapshots, log);
+        this.submit = new NativeSection('rbtflow.submit', () => this.submitItems());
+        this.review = new NativeSection('rbtflow.review', () => this.reviewItems());
+        this.inbox = new InboxView(context, () => this.current, target => this.openInbox(target), log);
         this.subscriptions.push(this.review.view.onDidChangeCheckboxState(event => {
             for (const [item, state] of event.items) { if (item.key === 'shipIt' && this.current && !this.current.busy) { void this.current.setFeedback(this.current.feedback.body, state === vscode.TreeItemCheckboxState.Checked); } }
         }));
@@ -68,6 +56,7 @@ export class ReviewSidebar implements vscode.Disposable {
                 pending = fresh.initialize().then(() => {
                     this.controllers.set(root, fresh);
                     this.subscriptions.push(fresh.onDidChange(() => { if (this.current === fresh) { this.render(); } }));
+                    this.subscriptions.push(fresh.onDidViewRequest(comparison => { void this.inbox.viewed(comparison).catch(error => this.log.warn('Could not mark request read', error)); }));
                     return fresh;
                 }).catch(error => { fresh.dispose(); throw error; }).finally(() => { this.initializing.delete(root); });
                 this.initializing.set(root, pending);
@@ -112,6 +101,7 @@ export class ReviewSidebar implements vscode.Disposable {
             this.item('version', 'Version', `${remote.selected.scope === 'draft' ? 'Draft' : 'Published'} v${remote.selected.revision}`, 'versions', 'review', 'version'),
             this.item('requestReviewers', 'Reviewers', reviewers.join(', ') || 'None', 'organization', 'review', c.canEditRequest ? 'reviewers' : undefined));
         if (details.bugs_closed.length) { rows.push(this.item('requestBugs', 'Bugs', details.bugs_closed.join(', '), 'issues', 'review', c.canEditRequest ? 'bugs' : undefined)); }
+        if (remote.review.public) { rows.push(this.discussion.root(c, remote)); }
         if (c.canPublishRequest) { rows.push(this.item('publishRequest', 'Publish request', '', 'cloud-upload', 'review', 'publishRequest')); }
         if (c.canEditRequest && c.session.plan?.input.reviewId === remote.requestId) { rows.push(this.item('saveDiff', 'Save diff', 'Current branch preview', 'cloud-upload', 'review', 'updateDiff')); }
         if (c.canReview) {
@@ -145,6 +135,7 @@ export class ReviewSidebar implements vscode.Disposable {
             canPublishRequest: !!c?.canPublishRequest && !c.busy, hasComparison: !!comparison };
         for (const [key, value] of Object.entries(contexts)) { void vscode.commands.executeCommand('setContext', `rbtflow.${key}`, value); }
         this.submit.refresh(); this.review.refresh();
+        this.inbox.follow(c);
     }
     async run(action: Action): Promise<void> {
         const c = this.current; if (!c || c.root !== action.root || c.busy) { return; }
@@ -188,5 +179,32 @@ export class ReviewSidebar implements vscode.Disposable {
         await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
     }
     async openUrl(): Promise<void> { const remote = this.current?.browser.current; if (remote) { await vscode.env.openExternal(vscode.Uri.parse(`${remote.server}r/${remote.requestId}/`)); } }
-    dispose(): void { this.subscriptions.forEach(value => value.dispose()); for (const c of this.controllers.values()) { c.dispose(); } this.comments.dispose(); this.inputs.dispose(); this.submit.dispose(); this.review.dispose(); }
+    async openInbox(value: InboxTarget | InboxItem): Promise<void> {
+        const target = value instanceof InboxItem ? value.target : value;
+        const c = await this.open(target.root, false);
+        if (await c.openRemote(target.entry.id, undefined, target.identity.server)) {
+            const comparison = c.browser.current;
+            if (comparison && comparison.username === target.identity.username) { await this.inbox.viewed(comparison, target); }
+            await vscode.commands.executeCommand('rbtflow.review.focus');
+        }
+    }
+    async refreshDiscussion(): Promise<void> { this.current?.discussion.clear(); this.review.refresh(); }
+    async openCommentDiff(value: DiscussionTarget | NativeItem): Promise<void> {
+        const target = this.discussion.target(value), c = this.current, location = target?.message?.location;
+        if (!target || !c || target.root !== c.root || c.browser.current?.id !== target.comparisonId || !location) { return; }
+        const comparison = target.index.comparison;
+        if (!await c.openRemote(location.requestId, { scope: 'published', revision: location.revision }, comparison.server)) { return; }
+        const item = this.changes.getFiles().find(item => c.browser.current?.files[item.index]?.id === location.fileId);
+        if (!item) { throw new Error('File no longer exists in this diff.'); }
+        await this.openChange(item);
+        const current = c.browser.current!, map = await c.backend(current.server).lines(current, location.fileId);
+        const rows = map.rows.filter(row => row[0] >= location.firstLine && row[0] < location.firstLine + location.numLines);
+        const tab = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+        if (!(tab instanceof vscode.TabInputTextDiff)) { return; }
+        const side = rows.some(row => row[2] !== null) ? 2 : 1, numbers = rows.flatMap(row => row[side] === null ? [] : [row[side]!]);
+        if (!numbers.length) { return; }
+        const uri = side === 2 ? tab.modified : tab.original, editor = vscode.window.visibleTextEditors.find(editor => editor.document.uri.toString() === uri.toString());
+        if (editor) { const range = new vscode.Range(numbers[0]! - 1, 0, numbers.at(-1)! - 1, 0); editor.selection = new vscode.Selection(range.start, range.end); editor.revealRange(range, vscode.TextEditorRevealType.InCenter); }
+    }
+    dispose(): void { this.subscriptions.forEach(value => value.dispose()); for (const c of this.controllers.values()) { c.dispose(); } this.comments.dispose(); this.inbox.dispose(); this.inputs.dispose(); this.submit.dispose(); this.review.dispose(); }
 }

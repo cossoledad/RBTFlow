@@ -6,6 +6,9 @@ import { ReviewController } from './views/reviewController';
 import { SnapshotFiles } from './views/snapshots';
 import { ChangeItem, ChangesTree } from './views/changesTree';
 import { Action, ReviewSidebar } from './views/reviewSidebar';
+import { InboxItem, InboxTarget } from './views/inboxView';
+import { DiscussionTarget } from './views/discussionTree';
+import { NativeItem } from './views/nativeTree';
 
 interface GitRepository { rootUri: vscode.Uri; state: { onDidChange: vscode.Event<void> }; }
 interface GitAPI { git: { path: string }; repositories: GitRepository[]; onDidOpenRepository: vscode.Event<GitRepository>; onDidCloseRepository: vscode.Event<GitRepository>; }
@@ -74,6 +77,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<RBTFlo
         command('rbtflow.editRequest', async () => sidebar.current?.editDetails('review')),
         command('rbtflow.updateDiff', async () => sidebar.current?.updateDiff()),
         command('rbtflow.openDescription', () => sidebar.openDescription()), command('rbtflow.openUrl', () => sidebar.openUrl()),
+        command('rbtflow.showDiscussion', target => sidebar.discussion.show(target as DiscussionTarget | NativeItem | undefined)),
+        command('rbtflow.refreshDiscussion', () => sidebar.refreshDiscussion()),
+        command('rbtflow.openCommentDiff', target => sidebar.openCommentDiff(target as DiscussionTarget | NativeItem)),
+        command('rbtflow.refreshInbox', async () => { await open(); await sidebar.inbox.refresh(); }),
+        command('rbtflow.openInboxRequest', target => sidebar.openInbox(target as InboxTarget | InboxItem)),
+        command('rbtflow.markInboxRead', target => sidebar.inbox.mark(target instanceof InboxItem ? target.target : target as InboxTarget, true)),
+        command('rbtflow.markInboxUnread', target => sidebar.inbox.mark(target instanceof InboxItem ? target.target : target as InboxTarget, false)),
+        command('rbtflow.markAllInboxRead', () => sidebar.inbox.markAllRead()),
         command('rbtflow.refresh', refresh), command('rbtflow.showLog', () => log.show()),
         command('rbtflow.refreshReview', async () => { const remote = sidebar.current?.browser.current; if (remote) { await sidebar.current?.openRemote(remote.requestId, remote.selected, remote.server); } }),
         command('rbtflow.cancel', () => sidebar.current?.cancel()), command('rbtflow.recover', () => sidebar.current?.recover()),

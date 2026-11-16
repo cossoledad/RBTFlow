@@ -16,6 +16,15 @@ export async function temporary(prefix: string): Promise<string> {
     return mkdtemp(path.join(project, 'build/tests', prefix));
 }
 export async function git(root: string, ...args: string[]): Promise<Buffer> { return runProcess('git', args, { cwd: root }); }
+/** Only the disposable local lab is addressed; never accept a production server here. */
+export async function labApi<T>(resource: string, method = 'GET', body?: URLSearchParams | FormData, user = 'admin'): Promise<T> {
+    const response = await fetch('http://127.0.0.1:8080/api' + resource, { method, body,
+        headers: { Authorization: `Basic ${Buffer.from(`${user}:rbtflow-local`).toString('base64')}` } });
+    const result = await response.json() as { stat: string; err?: unknown; fields?: unknown };
+    assertLab(result.stat === 'ok', `${method} ${resource}: ${JSON.stringify({ status: response.status, error: result.err, fields: result.fields })}`);
+    return result as T;
+}
+function assertLab(ok: boolean, message: string): asserts ok { if (!ok) { throw new Error(message); } }
 export async function fixtures(): Promise<{ dir: string; root: string; specs: Record<string, { base: string; head: string }> }> {
     const dir = await temporary('git-');
     await runProcess('python3', ['-c', 'import sys; from pathlib import Path; sys.path.insert(0,"scripts"); from fixtures import create; create(Path(sys.argv[1]))', dir], { cwd: project });
