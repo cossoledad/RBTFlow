@@ -1,0 +1,10 @@
+{
+  "version": "2.0.0",
+  "tasks": [{
+    "label": "Prepare RBTFlow",
+    "type": "shell",
+    "command": "bash dev.sh start && bash dev.sh prepare",
+    "problemMatcher": "$tsc",
+    "group": { "kind": "build", "isDefault": true }
+  }]
+}

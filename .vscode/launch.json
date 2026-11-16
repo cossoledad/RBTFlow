@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [{
+    "name": "Run RBTFlow (local lab)",
+    "type": "extensionHost",
+    "request": "launch",
+    "runtimeExecutable": "${execPath}",
+    "args": ["--extensionDevelopmentPath=${workspaceFolder}", "${workspaceFolder}/build/workspace"],
+    "outFiles": ["${workspaceFolder}/build/extension/**/*.js"],
+    "preLaunchTask": "Prepare RBTFlow",
+    "env": { "PATH": "${workspaceFolder}/build/venv/bin:${env:PATH}" }
+  }]
+}

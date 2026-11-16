@@ -1,0 +1,57 @@
+{
+  "name": "rbtflow",
+  "displayName": "RBTFlow",
+  "description": "Preview Git changes and create or update Review Board reviews with RBTools.",
+  "version": "0.1.0",
+  "publisher": "cossoledad",
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": { "type": "git", "url": "https://github.com/cossoledad/RBTFlow.git" },
+  "engines": { "vscode": "^1.96.0" },
+  "categories": ["SCM Providers", "Other"],
+  "main": "./build/extension/extension.js",
+  "extensionKind": ["workspace"],
+  "extensionDependencies": ["vscode.git"],
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": false, "description": "RBTools executes repository .reviewboardrc Python configuration." },
+    "virtualWorkspaces": { "supported": false, "description": "RBTFlow requires local Git and RBTools in the workspace extension host." }
+  },
+  "contributes": {
+    "commands": [
+      { "command": "rbtflow.openReview", "title": "RBTFlow: 打开提交审核", "icon": "$(git-pull-request)" },
+      { "command": "rbtflow.refresh", "title": "RBTFlow: 刷新仓库", "icon": "$(refresh)" },
+      { "command": "rbtflow.setToken", "title": "RBTFlow: 设置服务器 API Token", "icon": "$(key)" },
+      { "command": "rbtflow.showLog", "title": "RBTFlow: 查看日志", "icon": "$(output)" }
+    ],
+    "viewsContainers": { "activitybar": [{ "id": "rbtflow", "title": "RBTFlow", "icon": "media/icon.svg" }] },
+    "views": { "rbtflow": [{ "id": "rbtflow.repositories", "name": "审核项目" }] },
+    "viewsWelcome": [{ "view": "rbtflow.repositories", "contents": "打开一个 Git 项目，选择仓库开始审核。\n[刷新仓库](command:rbtflow.refresh)" }],
+    "menus": { "view/title": [
+      { "command": "rbtflow.openReview", "when": "view == rbtflow.repositories", "group": "navigation@1" },
+      { "command": "rbtflow.refresh", "when": "view == rbtflow.repositories", "group": "navigation@2" },
+      { "command": "rbtflow.showLog", "when": "view == rbtflow.repositories", "group": "navigation@3" }
+    ] },
+    "configuration": { "title": "RBTFlow", "properties": {
+      "rbtflow.rbtPath": { "type": "string", "default": "rbt", "scope": "machine-overridable", "description": "RBTools executable on the machine running this workspace. No shell arguments." },
+      "rbtflow.serverUrl": { "type": "string", "default": "", "description": "Review Board URL. Empty uses the existing RBTools configuration." },
+      "rbtflow.commandTimeoutSeconds": { "type": "number", "default": 120, "minimum": 5, "maximum": 1800, "description": "Timeout for each RBTools operation. Interrupted writes require checking server state." }
+    } }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "test": "npm run compile && node --test build/extension/test/core.test.js",
+    "test:integration": "npm run compile && node --test build/extension/test/integration.test.js",
+    "test:host": "npm run compile && node scripts/test-host.cjs",
+    "package": "npm run compile && vsce package --skip-license --out build/rbtflow-0.1.0.vsix",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "1.96.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "4.1.1",
+    "typescript": "7.0.2"
+  }
+}

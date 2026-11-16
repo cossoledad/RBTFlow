@@ -1,0 +1,15 @@
+**
+!package.json
+!README.md
+!media/*.svg
+!media/*.html
+!media/*.css
+!media/*.js
+!python/rbtflow_bridge.py
+!python/rbtflow_bridge-0.1.0.dist-info/METADATA
+!python/rbtflow_bridge-0.1.0.dist-info/entry_points.txt
+!build/extension/extension.js
+!build/extension/adapters/*.js
+!build/extension/application/*.js
+!build/extension/domain/*.js
+!build/extension/views/*.js

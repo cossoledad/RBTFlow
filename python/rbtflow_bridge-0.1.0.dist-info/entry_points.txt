@@ -1,0 +1,4 @@
+[rbtools_commands]
+rbtflow-context = rbtflow_bridge:Context
+rbtflow-sync-draft = rbtflow_bridge:SyncDraft
+rbtflow-verify-patch = rbtflow_bridge:VerifyPatch
