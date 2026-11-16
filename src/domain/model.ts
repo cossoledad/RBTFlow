@@ -98,6 +98,18 @@ export interface PendingWrite {
     kind: 'post' | 'publish'; plan: ReviewPlan; fields: ReviewFields; id?: number;
 }
 
+export class PublishValidationError extends Error {
+    constructor(readonly field: 'reviewers' | 'summary' | 'description') {
+        super(field === 'reviewers' ? 'Choose at least one reviewer.' : field === 'summary' ? 'Add a title.' : 'Add a description.');
+        this.name = 'PublishValidationError';
+    }
+}
+export function validatePublication(fields: ReviewFields): void {
+    if (!fields.people.length && !fields.groups.length) { throw new PublishValidationError('reviewers'); }
+    if (!fields.summary.trim()) { throw new PublishValidationError('summary'); }
+    if (!fields.description.trim()) { throw new PublishValidationError('description'); }
+}
+
 export function validateFields(fields: ReviewFields): void {
     if (!fields.summary.trim() || fields.summary.length > 300) { throw new Error('标题不能为空，最多 300 字符。'); }
     for (const [label, list] of [['审批人', fields.people], ['审批组', fields.groups], ['bug 号', fields.bugs]] as const) {

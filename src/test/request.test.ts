@@ -1,0 +1,63 @@
+import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+import { copyFile, writeFile } from 'node:fs/promises';
+import * as path from 'node:path';
+import { ApiError, RBToolsAdapter } from '../adapters/rbtools';
+import { ProcessError } from '../adapters/process';
+import { GitAdapter } from '../adapters/git';
+import { ReviewSession } from '../application/reviewSession';
+import { ReviewBrowser } from '../application/reviewBrowser';
+import { RequestSession, RequestWrite } from '../application/requestSession';
+import { PublishValidationError } from '../domain/model';
+import { FilePending, fields, git, input, labRoot, rbtPath, temporary } from './helpers';
+
+test('Git defaults, API 225 classification, legacy recovery and server-only draft editing/publication', { timeout: 120_000 }, async () => {
+    const dir = await temporary('request-'), checkout = path.join(dir, 'unrelated-checkout');
+    const factory = (server: string) => new RBToolsAdapter(labRoot, { executable: rbtPath, storage: dir, server });
+    const adapter = factory(''), gitAdapter = new GitAdapter();
+    const store = new FilePending(path.join(dir, 'post.json')); await store.initialize();
+    const session = new ReviewSession(labRoot, gitAdapter, factory, store), plan = await session.preview(input);
+    const raw = await gitAdapter.commitMessage(labRoot, plan.git.base, plan.git.head), guessed = await adapter.guessMessage(raw);
+    const firstSubject = (await git(labRoot, 'log', '--reverse', '--format=%s', `${plan.git.base}..${plan.git.head}`)).toString().split('\n')[0];
+    assert.equal(guessed.summary, firstSubject); assert(guessed.description?.trim());
+    const noReviewers = { ...fields, summary: guessed.summary!, description: guessed.description!, people: [], groups: [] };
+    const saved = await session.post(plan.id, plan.input, noReviewers);
+    await assert.rejects(session.publish(session.plan!.id, session.plan!.input, noReviewers), error => error instanceof PublishValidationError && error.field === 'reviewers');
+    assert.equal(store.load(), undefined);
+    await assert.rejects(factory(plan.server).publish(saved.id), error => error instanceof ApiError && error.code === 225);
+    assert.equal((await factory(plan.server).snapshot(saved.id)).review.public, false);
+    await store.save({ kind: 'publish', plan: session.plan!, fields: noReviewers, id: saved.id });
+    const restored = new ReviewSession(labRoot, gitAdapter, factory, store);
+    assert.equal((await restored.reconcile())?.published, false); assert.equal(store.load(), undefined);
+    await git(labRoot, 'worktree', 'add', '--detach', checkout, 'origin/main');
+    await copyFile(path.join(labRoot, '.reviewboardrc'), path.join(checkout, '.reviewboardrc'));
+    const remoteFactory = (server: string) => new RBToolsAdapter(checkout, { executable: rbtPath, storage: dir, server });
+    const browser = new ReviewBrowser(remoteFactory);
+    let pending: RequestWrite | undefined;
+    const journal = { load: () => pending, save: async (value: RequestWrite | undefined) => {
+        pending = value; await writeFile(path.join(dir, 'request-journal.json'), JSON.stringify(value ?? null));
+    } };
+    const request = new RequestSession(remoteFactory, journal), comparison = await browser.open(plan.server, saved.id);
+    await assert.rejects(request.publish(comparison), PublishValidationError); assert.equal(pending, undefined);
+    await request.edit(comparison, { people: ['reviewer'] }); assert.equal(pending, undefined);
+    await assert.rejects(request.edit(comparison, { bugs: ['STALE'] }), /changed/); assert.equal(pending, undefined);
+    const updated = await browser.open(plan.server, saved.id);
+    class Rejected extends RBToolsAdapter { override async publish(): Promise<void> { throw new ApiError('Injected definitive publish rejection', 225); } }
+    const rejected = new RequestSession(server => new Rejected(checkout, { executable: rbtPath, storage: dir, server }), journal);
+    await assert.rejects(rejected.publish(updated), /definitive/); assert.equal(pending, undefined);
+    assert.equal((await request.publish(updated)).published, true);
+    const published = await browser.open(plan.server, saved.id); assert.equal(published.selected.scope, 'published');
+    await request.edit(published, { bugs: ['METADATA-2'] });
+    const metadataOnly = await browser.open(plan.server, saved.id);
+    assert(metadataOnly.requestSnapshot?.draft); assert.equal(metadataOnly.selected.scope, 'published');
+    assert.deepEqual(metadataOnly.details.bugs_closed, ['METADATA-2']);
+    class LostResponse extends RBToolsAdapter {
+        override async publish(id: number, signal?: AbortSignal): Promise<void> {
+            await super.publish(id, signal); throw new ProcessError('Injected lost publish response', Buffer.alloc(0), Buffer.alloc(0), 'exit');
+        }
+    }
+    const lost = new RequestSession(server => new LostResponse(checkout, { executable: rbtPath, storage: dir, server }), journal);
+    await assert.rejects(lost.publish(metadataOnly), /lost publish/); assert(pending);
+    assert.equal((await new RequestSession(remoteFactory, journal).reconcile())?.published, true); assert.equal(pending, undefined);
+    await git(labRoot, 'worktree', 'remove', '--force', checkout);
+});

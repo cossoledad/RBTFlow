@@ -1,4 +1,4 @@
-import { ChangedFile, Link, ReviewResource } from './model';
+import { ChangedFile, DraftResource, Link, ReviewResource, ReviewSnapshot } from './model';
 
 export interface DiffVersion { scope: 'draft' | 'published'; revision: number; id: number; }
 export interface RemoteFile extends ChangedFile {
@@ -38,7 +38,8 @@ export interface RemoteComparison {
     files: RemoteFile[];
     reviewerDraft: ReviewerDraft | null;
     reviewerComments: ReviewComment[];
-    details: { summary: string; description: string; testing_done: string };
+    details: DraftResource | ReviewResource;
+    requestSnapshot: ReviewSnapshot | null;
 }
 export interface LineMap { rows: [number, number | null, number | null][]; }
 export interface InlineDraft {

@@ -1,8 +1,8 @@
 {
   "name": "rbtflow",
   "displayName": "RBTFlow",
-  "description": "Repository-scoped Review Board submission, comparison and code review in the VS Code sidebar.",
-  "version": "0.2.0",
+  "description": "Native VS Code views for Review Board submission, review and comparison.",
+  "version": "0.3.0",
   "publisher": "cossoledad",
   "license": "UNLICENSED",
   "private": true,
@@ -30,7 +30,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
-      "description": "RBTools executes repository .reviewboardrc Python configuration."
+      "description": "RBTools executes repository Python configuration."
     },
     "virtualWorkspaces": {
       "supported": false,
@@ -41,73 +41,137 @@
     "commands": [
       {
         "command": "rbtflow.openReview",
-        "title": "RBTFlow: 打开审核侧边栏",
+        "title": "RBTFlow: Open RBTFlow",
         "icon": "$(git-pull-request)"
       },
       {
         "command": "rbtflow.chooseRepository",
-        "title": "RBTFlow: 选择仓库",
+        "title": "RBTFlow: Choose Repository",
         "icon": "$(repo)"
       },
       {
         "command": "rbtflow.settings",
-        "title": "RBTFlow: 仓库设置",
+        "title": "RBTFlow: Repository Settings",
         "icon": "$(gear)"
       },
       {
+        "command": "rbtflow.preview",
+        "title": "RBTFlow: Preview Changes",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "rbtflow.createDraft",
+        "title": "RBTFlow: Create Draft",
+        "icon": "$(cloud-upload)"
+      },
+      {
         "command": "rbtflow.newReview",
-        "title": "RBTFlow: 新建审核",
+        "title": "RBTFlow: New Submission",
         "icon": "$(add)"
       },
       {
-        "command": "rbtflow.myReviews",
-        "title": "RBTFlow: 我的审核",
-        "icon": "$(account)"
-      },
-      {
         "command": "rbtflow.openById",
-        "title": "RBTFlow: 按 ID 查看审核",
+        "title": "RBTFlow: Open Request by ID",
         "icon": "$(go-to-file)"
       },
       {
-        "command": "rbtflow.refresh",
-        "title": "RBTFlow: 刷新仓库",
+        "command": "rbtflow.myReviews",
+        "title": "RBTFlow: My Requests",
+        "icon": "$(account)"
+      },
+      {
+        "command": "rbtflow.refreshReview",
+        "title": "RBTFlow: Refresh Request",
         "icon": "$(refresh)"
       },
       {
-        "command": "rbtflow.refreshComparison",
-        "title": "RBTFlow: 刷新对比",
+        "command": "rbtflow.publishRequest",
+        "title": "RBTFlow: Publish Request",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "rbtflow.editRequest",
+        "title": "RBTFlow: Edit Request Details",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "rbtflow.updateDiff",
+        "title": "RBTFlow: Update Request Diff",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "rbtflow.openDescription",
+        "title": "RBTFlow: View Description",
+        "icon": "$(note)"
+      },
+      {
+        "command": "rbtflow.openUrl",
+        "title": "RBTFlow: Open in Browser",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "rbtflow.refresh",
+        "title": "RBTFlow: Refresh Repositories",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "rbtflow.showLog",
+        "title": "RBTFlow: Show Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "rbtflow.cancel",
+        "title": "RBTFlow: Cancel",
+        "icon": "$(close)"
+      },
+      {
+        "command": "rbtflow.recover",
+        "title": "RBTFlow: Check Server",
+        "icon": "$(sync)"
       },
       {
         "command": "rbtflow.openChange",
-        "title": "RBTFlow: 对比文件",
+        "title": "RBTFlow: Open Diff",
         "icon": "$(diff)"
       },
       {
         "command": "rbtflow.showPatch",
-        "title": "RBTFlow: 查看原始差异",
+        "title": "RBTFlow: View Raw Diff",
         "icon": "$(code)"
       },
       {
+        "command": "rbtflow.showTree",
+        "title": "RBTFlow: Show as Tree",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "rbtflow.showList",
+        "title": "RBTFlow: Show as List",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "rbtflow.setToken",
+        "title": "RBTFlow: Set API Token",
+        "icon": "$(key)"
+      },
+      {
+        "command": "rbtflow.run",
+        "title": "RBTFlow: Run Action"
+      },
+      {
         "command": "rbtflow.addComment",
-        "title": "加入审阅草稿",
+        "title": "Add to Review",
         "enablement": "!commentIsEmpty"
       },
       {
         "command": "rbtflow.removeComment",
-        "title": "删除本地评论",
+        "title": "Remove Local Comment",
         "icon": "$(trash)"
       },
       {
-        "command": "rbtflow.setToken",
-        "title": "RBTFlow: 设置服务器 API Token",
-        "icon": "$(key)"
-      },
-      {
-        "command": "rbtflow.showLog",
-        "title": "RBTFlow: 查看日志",
-        "icon": "$(output)"
+        "command": "rbtflow.clearRecovery",
+        "title": "RBTFlow: Clear Recovery Record",
+        "icon": "$(clear-all)"
       }
     ],
     "viewsContainers": {
@@ -122,55 +186,142 @@
     "views": {
       "rbtflow": [
         {
+          "id": "rbtflow.submit",
+          "name": "Submit",
+          "initialSize": 160
+        },
+        {
           "id": "rbtflow.review",
-          "name": "审核",
-          "type": "webview",
-          "initialSize": 360
+          "name": "Review",
+          "initialSize": 220
         },
         {
           "id": "rbtflow.changes",
-          "name": "更改",
-          "initialSize": 240
+          "name": "Changes",
+          "initialSize": 280
         }
       ]
     },
     "viewsWelcome": [
       {
+        "view": "rbtflow.submit",
+        "contents": "Open a Git folder."
+      },
+      {
+        "view": "rbtflow.review",
+        "contents": "[Open request](command:rbtflow.openById)\n[My requests](command:rbtflow.myReviews)"
+      },
+      {
         "view": "rbtflow.changes",
-        "contents": "预览本地更改，或按 ID 打开已提交的审核。\n[按 ID 打开](command:rbtflow.openById)"
+        "contents": "Preview changes or select a review request."
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "rbtflow.chooseRepository",
-          "when": "view == rbtflow.review",
+          "when": "view == rbtflow.submit",
           "group": "navigation@1"
         },
         {
           "command": "rbtflow.settings",
+          "when": "view == rbtflow.submit",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rbtflow.preview",
+          "when": "view == rbtflow.submit && !rbtflow.busy",
+          "group": "navigation@3"
+        },
+        {
+          "command": "rbtflow.createDraft",
+          "when": "view == rbtflow.submit && rbtflow.canCreate",
+          "group": "navigation@4"
+        },
+        {
+          "command": "rbtflow.newReview",
+          "when": "view == rbtflow.submit",
+          "group": "other@1"
+        },
+        {
+          "command": "rbtflow.showLog",
+          "when": "view == rbtflow.submit",
+          "group": "other@2"
+        },
+        {
+          "command": "rbtflow.cancel",
+          "when": "view == rbtflow.submit && rbtflow.busy",
+          "group": "navigation@5"
+        },
+        {
+          "command": "rbtflow.openById",
+          "when": "view == rbtflow.review",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rbtflow.myReviews",
           "when": "view == rbtflow.review",
           "group": "navigation@2"
         },
         {
-          "command": "rbtflow.newReview",
-          "when": "view == rbtflow.review",
+          "command": "rbtflow.refreshReview",
+          "when": "view == rbtflow.review && rbtflow.hasReview && !rbtflow.busy",
           "group": "navigation@3"
+        },
+        {
+          "command": "rbtflow.openUrl",
+          "when": "view == rbtflow.review && rbtflow.hasReview",
+          "group": "navigation@4"
+        },
+        {
+          "command": "rbtflow.editRequest",
+          "when": "view == rbtflow.review && rbtflow.canEditRequest",
+          "group": "other@1"
+        },
+        {
+          "command": "rbtflow.updateDiff",
+          "when": "view == rbtflow.review && rbtflow.canEditRequest",
+          "group": "other@2"
+        },
+        {
+          "command": "rbtflow.openDescription",
+          "when": "view == rbtflow.review && rbtflow.hasReview",
+          "group": "other@3"
+        },
+        {
+          "command": "rbtflow.recover",
+          "when": "view == rbtflow.review",
+          "group": "other@4"
         },
         {
           "command": "rbtflow.showLog",
           "when": "view == rbtflow.review",
-          "group": "other"
+          "group": "other@5"
         },
         {
-          "command": "rbtflow.refreshComparison",
-          "when": "view == rbtflow.changes",
+          "command": "rbtflow.cancel",
+          "when": "view == rbtflow.review && rbtflow.busy",
+          "group": "navigation@5"
+        },
+        {
+          "command": "rbtflow.showTree",
+          "when": "view == rbtflow.changes && rbtflow.changesLayout == list",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rbtflow.showList",
+          "when": "view == rbtflow.changes && rbtflow.changesLayout == tree",
           "group": "navigation@1"
         },
         {
           "command": "rbtflow.showPatch",
-          "when": "view == rbtflow.changes",
+          "when": "view == rbtflow.changes && rbtflow.hasComparison",
           "group": "navigation@2"
+        },
+        {
+          "command": "rbtflow.clearRecovery",
+          "when": "view == rbtflow.review && rbtflow.hasPending && !rbtflow.busy",
+          "group": "other@6"
         }
       ],
       "comments/commentThread/context": [
@@ -189,6 +340,14 @@
       ],
       "commandPalette": [
         {
+          "command": "rbtflow.run",
+          "when": "false"
+        },
+        {
+          "command": "rbtflow.openChange",
+          "when": "false"
+        },
+        {
           "command": "rbtflow.addComment",
           "when": "false"
         },
@@ -197,8 +356,12 @@
           "when": "false"
         },
         {
-          "command": "rbtflow.openChange",
+          "command": "rbtflow.openUrl",
           "when": "false"
+        },
+        {
+          "command": "rbtflow.clearRecovery",
+          "when": "rbtflow.hasPending && !rbtflow.busy"
         }
       ]
     },
@@ -230,9 +393,9 @@
     "compile": "node scripts/compile.cjs",
     "watch": "tsc -p . --watch",
     "test": "npm run compile && node --test build/extension/test/core.test.js build/extension/test/repository.test.js",
-    "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js",
+    "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js build/extension/test/request.test.js",
     "test:host": "npm run compile && node scripts/test-host.cjs",
-    "package": "npm run compile && vsce package --skip-license --out build/rbtflow-0.2.0.vsix",
+    "package": "vsce package --skip-license --out build/rbtflow-0.3.0.vsix",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {

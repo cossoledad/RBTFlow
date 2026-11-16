@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { GitAdapter } from '../adapters/git';
-import { Connection, RBToolsAdapter } from '../adapters/rbtools';
-import { inputKey, patchDigest, PendingWrite, Receipt, ReviewFields, ReviewInput, ReviewPlan, validateFields } from '../domain/model';
+import { ApiError, Connection, RBToolsAdapter } from '../adapters/rbtools';
+import { inputKey, patchDigest, PendingWrite, Receipt, ReviewFields, ReviewInput, ReviewPlan, validateFields, validatePublication } from '../domain/model';
 
 export interface PendingStore {
     load(): PendingWrite | undefined;
@@ -108,13 +108,20 @@ export class ReviewSession {
         if (this.pending || !this.receipt || !this.plan) { throw new Error('请先保存并核对当前草稿。'); }
         this.writing = true;
         try {
+            validatePublication(fields);
             const plan = await this.current(planId, input, signal), receipt = this.receipt, backend = this.backend(plan.server);
             if (await backend.username(signal) !== plan.username) { throw new Error('登录用户已变化，请重新连接并预览。'); }
             if (input.reviewId !== receipt.id) { throw new Error('当前选择的审核单已变化，请重新预览。'); }
             const saved = await backend.verify(plan, fields, receipt.id, false, signal);
             if (saved.fingerprint !== receipt.fingerprint) { throw new Error('服务器草稿已变化，请重新载入核对后再发布。'); }
             await this.pendingStore.save({ kind: 'publish', plan, fields, id: receipt.id });
-            await backend.publish(receipt.id, signal);
+            try { await backend.publish(receipt.id, signal); }
+            catch (error) {
+                if (error instanceof ApiError && (await backend.snapshot(receipt.id, signal)).fingerprint === saved.fingerprint) {
+                    await this.pendingStore.save(undefined);
+                }
+                throw error;
+            }
             this.receipt = await backend.verify(plan, fields, receipt.id, true, signal);
             await this.pendingStore.save(undefined);
             this.invalidate();
@@ -128,6 +135,7 @@ export class ReviewSession {
         this.writing = true;
         try {
             const backend = this.backend(pending.plan.server);
+            if (await backend.username(signal) !== pending.plan.username) { throw new Error('Sign in as the original author to check this operation.'); }
             let id = pending.id;
             if (!id) {
                 const reviews = await backend.list<{ id: number; public: boolean; extra_data: Record<string, unknown> }>('/review-requests/', 'review_requests', {
@@ -144,7 +152,11 @@ export class ReviewSession {
                 id = matches[0]?.id;
             }
             if (!id) { throw new Error('暂未找到完整提交。请检查服务器上的新草稿；确认后可清除待确认状态，不会自动重发。'); }
-            const receipt = await backend.verify(pending.plan, pending.fields, id, pending.kind === 'publish', signal);
+            const snapshot = await backend.snapshot(id, signal);
+            // A rejected publication leaves the verified draft intact. It is a
+            // known draft, not an indefinitely uncertain write.
+            const published = pending.kind === 'publish' && !snapshot.draft && snapshot.review.public;
+            const receipt = await backend.verify(pending.plan, pending.fields, id, published, signal);
             await this.pendingStore.save(undefined);
             this.receipt = receipt;
             this.invalidate();

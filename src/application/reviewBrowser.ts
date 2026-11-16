@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, RBToolsAdapter } from '../adapters/rbtools';
 import { DiffVersion, RemoteComparison, RemoteFile, ReviewComment, ReviewerDraft } from '../domain/comparison';
-import { DraftResource, ReviewResource } from '../domain/model';
+import { DraftResource, ReviewResource, ReviewSnapshot } from '../domain/model';
 
 export class ReviewBrowser {
     current?: RemoteComparison;
@@ -13,7 +13,7 @@ export class ReviewBrowser {
         const generation = ++this.generation;
         const context = await this.backend(server).context(signal), adapter = this.backend(context.server);
         const username = await adapter.username(signal);
-        const review = (await adapter.api<{ review_request: ReviewResource }>(`/review-requests/${id}/`, {}, signal)).review_request;
+        let review = (await adapter.api<{ review_request: ReviewResource }>(`/review-requests/${id}/`, {}, signal)).review_request;
         const repositoryId = Number(new URL(review.links.repository!.href).pathname.match(/\/repositories\/(\d+)\/$/)?.[1]);
         if (!repositoryId) { throw new Error('审核单没有可比较的代码仓库。'); }
         const repository = await adapter.api<{ repository: { name: string; tool: string } }>(`/repositories/${repositoryId}/`, {}, signal);
@@ -21,12 +21,15 @@ export class ReviewBrowser {
         const published = await adapter.list<{ id: number; revision: number }>(`/review-requests/${id}/diffs/`, 'diffs', {}, signal);
         const versions: DiffVersion[] = published.map(version => ({ id: version.id, revision: version.revision, scope: 'published' }));
         let ownDraft: DraftResource | undefined;
+        let requestSnapshot: ReviewSnapshot | null = null;
         // Never probe another author's private request draft, even as a server admin.
         if (review.links.submitter?.title === username) {
             try {
-                ownDraft = (await adapter.api<{ draft: DraftResource }>(`/review-requests/${id}/draft/`, {}, signal)).draft;
-                const drafts = await adapter.list<{ id: number; revision: number }>(`/review-requests/${id}/draft/diffs/`, 'diffs', {}, signal);
-                versions.push(...drafts.map(version => ({ id: version.id, revision: version.revision, scope: 'draft' as const })));
+                requestSnapshot = await adapter.snapshot(id, signal); review = requestSnapshot.review; ownDraft = requestSnapshot.draft ?? undefined;
+                if (ownDraft) {
+                    const drafts = await adapter.list<{ id: number; revision: number }>(`/review-requests/${id}/draft/diffs/`, 'diffs', {}, signal);
+                    versions.push(...drafts.map(version => ({ id: version.id, revision: version.revision, scope: 'draft' as const })));
+                }
             } catch (error) { if (!(error instanceof ApiError && error.code === 100)) { throw error; } }
         }
         versions.sort((a, b) => b.revision - a.revision || (a.scope === 'draft' ? -1 : 1));
@@ -47,7 +50,7 @@ export class ReviewBrowser {
         if (signal?.aborted || generation !== this.generation) { throw new Error('对比结果已过期。'); }
         const result: RemoteComparison = { id: randomUUID(), kind: 'remote', server: context.server, requestId: id, username, review,
             repositoryName: repository.repository.name, selected, versions, files, reviewerDraft, reviewerComments,
-            details: selected.scope === 'draft' && ownDraft ? ownDraft : review };
+            details: ownDraft ?? review, requestSnapshot };
         this.current = result;
         return result;
     }

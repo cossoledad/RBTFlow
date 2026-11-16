@@ -10,7 +10,7 @@ export function initialForm(server = ''): FormData {
     return { server, repositoryId: null, targetRef: '', baseRef: '', mode: 'squash', reviewId: null,
         summary: '', description: '', testing: '', people: [], groups: [], bugs: [], branch: '', changeDescription: '' };
 }
-const preferenceFields = ['server', 'repositoryId', 'targetRef', 'baseRef', 'mode', 'people', 'groups', 'bugs', 'branch', 'testing'] as const;
+const preferenceFields = ['server', 'repositoryId', 'targetRef', 'baseRef', 'mode', 'people', 'groups', 'bugs', 'branch'] as const;
 
 /** Canonical repository root scopes global state across VS Code workspaces/windows. */
 export class RepositoryStore {

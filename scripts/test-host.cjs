@@ -3,6 +3,12 @@ const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
 const { downloadAndUnzipVSCode, runTests } = require('@vscode/test-electron');
 const root = path.resolve(__dirname, '..');
+async function git(args) {
+  await new Promise((resolve, reject) => {
+    const child = spawn('git', ['-C', path.join(root, 'build/workspace'), ...args], { cwd: root, stdio: 'inherit' });
+    child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error('Git fixture command failed')));
+  });
+}
 async function ensureReviewFixture() {
   const headers = { Authorization: `Basic ${Buffer.from('admin:rbtflow-local').toString('base64')}` };
   try {
@@ -35,6 +41,14 @@ async function main() {
   }
   await ensureReviewFixture();
   const dir = await fs.mkdtemp(path.join(resultDir, 'run-'));
+  const workspace = path.join(dir, 'workspace');
+  await git(['worktree', 'add', '--detach', workspace, 'feature/merged']);
+  await fs.copyFile(path.join(root, 'build/workspace/.reviewboardrc'), path.join(workspace, '.reviewboardrc')); await fs.chmod(path.join(workspace, '.reviewboardrc'), 0o600);
+  await fs.mkdir(path.join(workspace, 'src/features'), { recursive: true });
+  await fs.mkdir(path.join(workspace, 'src/Unicode space'), { recursive: true });
+  await fs.writeFile(path.join(workspace, 'src/features/review.ts'), 'export const nativeReview = true;\n');
+  await fs.writeFile(path.join(workspace, 'src/Unicode space/说明.md'), 'Native tree validation\n');
+  await git(['-C', workspace, 'add', 'src']); await git(['-C', workspace, 'commit', '-m', 'Validate native review views', '-m', 'Add nested files for tree and list comparison.']);
   const user = path.join(dir, 'user');
   await fs.mkdir(path.join(user, 'User'), { recursive: true });
   await fs.writeFile(path.join(user, 'User/settings.json'), JSON.stringify({
@@ -47,13 +61,15 @@ async function main() {
     vscodeExecutablePath: executable,
     extensionDevelopmentPath: process.env.RBTFLOW_EXTENSION_PATH || root,
     extensionTestsPath: path.join(root, 'build/extension/test/host.js'),
+    extensionTestsEnv: { RBTFLOW_HOST_ROOT: workspace },
     launchArgs: [...(process.env.RBTFLOW_CDP_PORT ? [`--remote-debugging-port=${process.env.RBTFLOW_CDP_PORT}`] : []), '--disable-extensions', '--disable-workspace-trust', '--no-sandbox', '--disable-gpu',
-      '--skip-welcome', '--skip-release-notes', '--user-data-dir', user, '--extensions-dir', path.join(dir, 'extensions'), path.join(root, 'build/workspace')],
+      '--skip-welcome', '--skip-release-notes', '--user-data-dir', user, '--extensions-dir', path.join(dir, 'extensions'), workspace],
   });
   const reportFile = path.join(resultDir, 'latest.json');
   const report = JSON.parse(await fs.readFile(reportFile, 'utf8'));
   report.extensionPath = process.env.RBTFLOW_EXTENSION_PATH || root;
   await fs.writeFile(reportFile, JSON.stringify(report, null, 2) + '\n');
+  await git(['worktree', 'remove', '--force', workspace]);
 }
 main().catch(async error => {
   await fs.mkdir(path.join(root, 'build/host'), { recursive: true });

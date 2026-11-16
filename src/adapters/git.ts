@@ -36,6 +36,9 @@ export class GitAdapter {
         const names = text(await this.run(root, ['remote'], signal)).trim().split('\n').filter(Boolean);
         return Promise.all(names.map(async name => text(await this.run(root, ['remote', 'get-url', name], signal)).trim()));
     }
+    commitMessage(root: string, base: string, head: string, signal?: AbortSignal): Promise<Buffer> {
+        return this.run(root, ['log', '--reverse', '--pretty=format:%s%n%n%b', `^${base}`, head, '--'], signal);
+    }
     async fingerprint(root: string, input: ReviewInput, signal?: AbortSignal): Promise<string> {
         const values = await Promise.all([
             this.resolve(root, 'HEAD', signal), this.resolve(root, input.targetRef, signal),

@@ -21,6 +21,66 @@ class Defaults(BaseCommand):
         self.json.add("defaults", repository_defaults(self.config))
 
 
+class GuessMessage(BaseCommand):
+    name = "rbtflow-guess-message"
+    option_list = [Option("--message-file", dest="message_file")]
+
+    def main(self):
+        from rbtools.utils.commit_messages import parse_commit_message
+        with open(self.options.message_file, encoding="utf-8") as stream:
+            fields = parse_commit_message(stream.read().strip(), custom_parser=self.config.get("COMMIT_MESSAGE_PARSER"))
+        self.json.add("fields", fields or {})
+
+
+class PublishRequest(BaseCommand):
+    name = "rbtflow-publish-request"
+    needs_api = True
+    args = "<request-id>"
+    option_list = [BaseCommand.server_options]
+
+    def main(self, request_id):
+        from rbtools.api.errors import APIError
+        try:
+            self.api_root.get_review_request(review_request_id=int(request_id)).get_draft().update(public=True)
+        except APIError as error:
+            self.json.add("error", {"code": error.error_code, "message": str(error)})
+            return
+        self.json.add("published", True)
+
+
+class EditRequest(BaseCommand):
+    name = "rbtflow-edit-request"
+    needs_api = True
+    args = "<request-id>"
+    option_list = [BaseCommand.server_options, Option("--fields-file", dest="fields_file")]
+
+    def main(self, request_id):
+        from rbtools.api.errors import APIError
+        with open(self.options.fields_file, encoding="utf-8") as stream:
+            data = json.load(stream)
+        request = self.api_root.get_review_request(review_request_id=int(request_id))
+        try:
+            draft = request.get_draft()
+        except APIError as error:
+            if error.error_code != 100:
+                raise
+            draft = None
+        if request.last_updated != data["request_updated"] or (draft.last_updated if draft else None) != data["draft_updated"]:
+            self.json.add("error", {"code": 409, "message": "Request changed; refresh before editing"})
+            self.json.add("not_applied", True)
+            return
+        values = data["fields"]
+        allowed = {"summary", "description", "target_people", "target_groups", "bugs_closed"}
+        if set(values) - allowed or not all(isinstance(value, str) for value in values.values()):
+            raise CommandError("Invalid request fields")
+        try:
+            if draft is None:
+                draft = request.get_or_create_draft()
+            draft.update(**values, description_text_type="plain", **{"extra_data.rbtflow_request_operation_id": data["operation_id"]})
+        except APIError as error:
+            self.json.add("error", {"code": error.error_code, "message": str(error)})
+
+
 class Context(BaseCommand):
     name = "rbtflow-context"
     needs_api = True

@@ -69,5 +69,10 @@ export class SnapshotFiles implements vscode.FileSystemProvider {
         const result: [vscode.Uri, vscode.Uri] = [make('base'), make('head')]; this.pairs.set(key, result); return result;
     }
     remote(uri: vscode.Uri): RemoteDocument | undefined { return this.entries.get(uri.toString())?.remote; }
+    content(key: string, filename: string, load: () => Promise<Buffer>): vscode.Uri {
+        const uri = vscode.Uri.from({ scheme: 'rbtflow', path: `/${filename}`, query: `content=${encodeURIComponent(key)}` });
+        if (!this.entries.has(uri.toString())) { this.entries.set(uri.toString(), { load }); }
+        return uri;
+    }
     dispose(): void { this.entries.clear(); this.pairs.clear(); this.cachedBytes = 0; this.changes.dispose(); }
 }

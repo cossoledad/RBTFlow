@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { initialForm, RepositoryStore, StateStorage } from '../application/repositoryStore';
 import { virtualRange } from '../domain/comparison';
+import { changeTree, DiffNode } from '../domain/fileTree';
 
 class PersistedState implements StateStorage {
     private data: Record<string, unknown>;
@@ -50,4 +51,17 @@ test('comments map actual source/destination lines to Review Board virtual rows,
     assert.deepEqual(virtualRange(map, 'head', 1, 2), { firstLine: 1, numLines: 4 });
     assert.throws(() => virtualRange(map, 'head', 4, 4), /精确/);
     assert.throws(() => virtualRange(map, 'head', 0, 1), /无效/);
+});
+
+test('tree/list layouts retain every file identity across nested folders, renames and Unicode paths', () => {
+    const files = [
+        { status: 'R100', oldPath: 'old.ts', path: 'src/core/new.ts' }, { status: 'D', oldPath: 'src/old.ts', path: 'src/old.ts' },
+        { status: 'A', oldPath: '测试 space/name.md', path: '测试 space/name.md' }, { status: 'M', oldPath: 'README.md', path: 'README.md' },
+    ];
+    const tree = changeTree(files), leaves: number[] = [];
+    const walk = (nodes: DiffNode[]) => { for (const node of nodes) { if (node.kind === 'folder') { walk(node.children); } else { assert.equal(node.file, files[node.index]); leaves.push(node.index); } } };
+    walk(tree); assert.deepEqual(leaves.sort(), [0, 1, 2, 3]);
+    const src = tree.find(node => node.kind === 'folder' && node.path === 'src'); assert(src?.kind === 'folder');
+    assert.equal(src.children[0]?.kind, 'folder');
+    assert(tree.at(-1)?.kind === 'file');
 });

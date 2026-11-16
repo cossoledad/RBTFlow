@@ -10,7 +10,7 @@ export class ReviewComments implements vscode.Disposable {
     private readonly threads = new Set<vscode.CommentThread>();
     private readonly shown = new Map<string, [vscode.Uri, vscode.Uri]>();
     constructor(private readonly snapshots: SnapshotFiles, private readonly active: () => ReviewController | undefined) {
-        this.controller.options = { placeHolder: '填写行内意见，加入审阅草稿后统一保存和发布。', prompt: '添加审阅意见' };
+        this.controller.options = { placeHolder: 'Add a comment to your review draft', prompt: 'Review comment' };
         this.controller.commentingRangeProvider = {
             provideCommentingRanges: async document => {
                 const remote = snapshots.remote(document.uri);
@@ -46,7 +46,7 @@ export class ReviewComments implements vscode.Disposable {
         const item = { id: randomUUID(), fileId: remote.comparison.files[remote.fileIndex]!.id, side: remote.side,
             ...range, text: reply.text, issueOpened: false };
         await active.addInline(remote.comparison.id, item);
-        reply.thread.comments = [{ body: item.text, author: { name: remote.comparison.username }, mode: vscode.CommentMode.Preview, label: '本地草稿' }];
+        reply.thread.comments = [{ body: item.text, author: { name: remote.comparison.username }, mode: vscode.CommentMode.Preview, label: 'Local draft' }];
         reply.thread.canReply = false; reply.thread.contextValue = item.id;
         this.threads.add(reply.thread);
     }
@@ -78,11 +78,11 @@ export class ReviewComments implements vscode.Disposable {
         };
         for (const comment of comments) {
             make(comment.first_line, comment.num_lines, comment.extra_data.rbtflow_side === 'base' ? 'base' : 'head', comment.text,
-                comment.links.user?.title ?? 'Review Board', comment.public ? '已发布' : '服务器草稿');
+                comment.links.user?.title ?? 'Review Board', comment.public ? 'Published' : 'Server draft');
         }
         const saved = new Set(comments.map(comment => comment.extra_data.rbtflow_comment_id));
         for (const comment of active.feedback.comments.filter(item => item.fileId === remote.comparison.files[remote.fileIndex]!.id && !saved.has(item.id))) {
-            const thread = make(comment.firstLine, comment.numLines, comment.side, comment.text, remote.comparison.username, '本地草稿');
+            const thread = make(comment.firstLine, comment.numLines, comment.side, comment.text, remote.comparison.username, 'Local draft');
             if (thread) { thread.contextValue = comment.id; }
         }
     }

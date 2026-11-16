@@ -8,7 +8,7 @@ import { ProcessError, runProcess } from './process';
 import { diffPrefix, LineMap, RemoteComparison, ReviewerDraft, ReviewComment } from '../domain/comparison';
 
 export class ApiError extends Error {
-    constructor(message: string, readonly code: number) { super(message); }
+    constructor(message: string, readonly code: number, readonly notApplied = false) { super(message); }
 }
 export interface RbtOptions {
     executable: string;
@@ -127,6 +127,21 @@ export class RBToolsAdapter {
         const payload = JSON.parse((await this.command(['rbtflow-defaults', '--json'], signal)).toString('utf8')) as { defaults: RepositoryContext['defaults'] };
         return payload.defaults;
     }
+    async guessMessage(message: Buffer, signal?: AbortSignal): Promise<{ summary?: string; description?: string; testing_done?: string; bugs_closed?: string }> {
+        const payload = JSON.parse((await this.command(['rbtflow-guess-message', '--json'], signal,
+            { '--message-file': message.toString('utf8') })).toString('utf8')) as { fields: { summary?: string; description?: string; testing_done?: string; bugs_closed?: string } };
+        return payload.fields;
+    }
+    async editRequest(id: number, payload: Record<string, unknown>, signal?: AbortSignal): Promise<void> {
+        const result = JSON.parse((await this.command(['rbtflow-edit-request', '--json', '--disable-cache'], signal,
+            { '--fields-file': JSON.stringify(payload) }, [String(id)])).toString('utf8')) as { error?: { code: number; message: string }; not_applied?: boolean };
+        if (result.error) { throw new ApiError(result.error.message, result.error.code, result.not_applied); }
+    }
+    async patchHash(id: number, revision: number, scope: 'draft' | 'published', signal?: AbortSignal): Promise<string> {
+        const result = JSON.parse((await this.command(['rbtflow-verify-patch', '--json', '--disable-cache',
+            String(id), String(revision), scope], signal)).toString('utf8')) as { patch_hash: string };
+        return result.patch_hash;
+    }
     async comparisonData(comparison: RemoteComparison, fileId: number, part: 'base' | 'head' | 'patch', signal?: AbortSignal): Promise<Buffer> {
         const payload = JSON.parse((await this.command(['rbtflow-read-comparison', '--json', '--disable-cache',
             String(comparison.requestId), String(comparison.selected.revision), comparison.selected.scope, String(fileId), part], signal)).toString('utf8')) as { content: string };
@@ -230,7 +245,8 @@ export class RBToolsAdapter {
         if (!href || !new URL(href).pathname.endsWith(`/repositories/${id}/`)) { throw new Error('审核单所属服务器仓库与选择不一致。'); }
     }
     async publish(id: number, signal?: AbortSignal): Promise<void> {
-        const payload = JSON.parse((await this.command(['publish', '--json', '--disable-cache', String(id)], signal)).toString('utf8')) as { status: string };
-        if (payload.status !== 'success') { throw new Error('发布结果不明，请核对服务器。'); }
+        const payload = JSON.parse((await this.command(['rbtflow-publish-request', '--json', '--disable-cache', String(id)], signal)).toString('utf8')) as { published?: boolean; error?: { code: number; message: string } };
+        if (payload.error) { throw new ApiError(payload.error.message, payload.error.code); }
+        if (!payload.published) { throw new Error('Publication result is unknown. Check the server.'); }
     }
 }
