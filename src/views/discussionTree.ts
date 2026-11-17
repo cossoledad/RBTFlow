@@ -8,6 +8,7 @@ import { SnapshotFiles } from './snapshots';
 
 export interface DiscussionTarget { root: string; comparisonId: string; index: DiscussionIndex; review?: DiscussionReview; message?: DiscussionMessage; }
 export class DiscussionTree {
+    private readonly transcripts = new Map<string, { root: string; uri: vscode.Uri }>();
     constructor(private readonly active: () => ReviewController | undefined, private readonly snapshots: SnapshotFiles,
                 private readonly log: vscode.LogOutputChannel) {}
     private current(c: ReviewController, comparison: RemoteComparison): boolean { return this.active() === c && c.browser.current?.id === comparison.id; }
@@ -51,11 +52,14 @@ export class DiscussionTree {
     }
     private message(c: ReviewController, index: DiscussionIndex, message: DiscussionMessage): NativeItem {
         const text = message.text.split(/\r?\n/).find(line => line.trim())?.trim().slice(0, 90) || 'Comment';
-        const description = [message.path, message.location && `v${message.location.revision}`, message.issue, message.contextUnavailable && 'File unavailable'].filter(Boolean).join(' · ');
+        const description = [message.path, message.location && `v${message.location.revision}`, message.location?.side === 'base' && 'Original', message.issue, message.contextUnavailable && 'File unavailable'].filter(Boolean).join(' · ');
         const row = new NativeItem(message.key, text, description, message.kind === 'diff' ? 'code' : message.kind === 'attachment' ? 'file' : message.kind === 'screenshot' ? 'file-media' : 'comment');
-        row.id = `${index.id}:${message.key}`; row.tooltip = `${message.author} · ${message.timestamp}\n${message.text}`;
+        row.id = `${c.root}:${index.comparison.requestId}:${message.key}`;
+        row.tooltip = messageText(message, index.comparison.requestId);
         const target: DiscussionTarget = { root: c.root, comparisonId: index.comparison.id, index, message };
-        row.command = { command: 'rbtflow.showDiscussion', title: 'Read comment', arguments: [target] };
+        row.command = message.location && !message.contextUnavailable
+            ? { command: 'rbtflow.openCommentDiff', title: 'Open comment in diff', arguments: [target] }
+            : { command: 'rbtflow.showDiscussion', title: 'Read comment', arguments: [target] };
         row.contextValue = message.location && !message.contextUnavailable ? 'rbtflow.diffComment' : 'rbtflow.discussionMessage';
         // A structured target, never a command URI parsed from comment text.
         (row as NativeItem & { discussionTarget: DiscussionTarget }).discussionTarget = target;
@@ -70,7 +74,19 @@ export class DiscussionTree {
         const content = target?.message ? messageText(target.message, comparison.requestId) : await c.discussion.transcript(comparison);
         if (!this.current(c, comparison)) { return; }
         const index = c.discussion.current;
-        const uri = this.snapshots.content(`${index?.id}:${target?.message?.key ?? 'all'}`, `review-${comparison.requestId}-comments.md`, () => Promise.resolve(Buffer.from(content)));
+        const key = JSON.stringify([comparison.server, comparison.username, comparison.requestId]);
+        const uri = target?.message
+            ? this.snapshots.content(`${index?.id}:${target.message.key}`, `review-${comparison.requestId}-comment.md`, () => Promise.resolve(Buffer.from(content)))
+            : this.snapshots.liveContent(key, `review-${comparison.requestId}-comments.md`, Buffer.from(content));
+        if (!target?.message) { this.transcripts.set(key, { root: c.root, uri }); }
         await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    }
+    async refreshOpen(c: ReviewController): Promise<void> {
+        const comparison = c.browser.current;
+        if (!comparison) { return; }
+        const entry = this.transcripts.get(JSON.stringify([comparison.server, comparison.username, comparison.requestId]));
+        if (!entry || entry.root !== c.root || !vscode.workspace.textDocuments.some(document => document.uri.toString() === entry.uri.toString())) { return; }
+        const text = await c.discussion.transcript(comparison);
+        if (this.current(c, comparison)) { this.snapshots.updateLiveContent(entry.uri, Buffer.from(text)); }
     }
 }

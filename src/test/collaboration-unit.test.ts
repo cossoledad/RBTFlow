@@ -8,6 +8,7 @@ import { RemoteComparison } from '../domain/comparison';
 import { commentLocation, DiscussionComment, DiscussionReview, messageText } from '../domain/discussion';
 import { emptyInbox, inboxEntry, inboxKey, isUnread, readInbox, sortInbox, syncInbox } from '../domain/inbox';
 import { ReviewResource } from '../domain/model';
+import { PublicActivity, WatchResult } from '../domain/activity';
 
 export class MemoryState implements StateStorage {
     private data: Record<string, unknown>;
@@ -64,6 +65,9 @@ class InboxBackend extends RBToolsAdapter {
     direct = [request(), request(2, { target_people: [] }), request(3, { public: false }), request(4, { status: 'submitted' }),
         request(5, { links: { ...request().links, submitter: { title: identity.username, href: identity.server + 'api/users/alice/' } } })];
     group = [request(6, { target_people: [], target_groups: [{ href: identity.server + 'api/groups/team/', title: 'team' }] })];
+    own: ReviewResource[] = [];
+    lastActivity: PublicActivity = { id: 1, type: 'diff', timestamp: '2026-01-01T00:00:00Z', actor: 'bob' };
+    activityErrors: number[] = [];
     constructor() { super('/unused', { executable: 'unused', storage: '/unused', server: identity.server }); }
     override async context(): Promise<RepositoryContext> { return { server: identity.server, defaults: {} }; }
     override async username(): Promise<string> { return this.account; }
@@ -71,7 +75,11 @@ class InboxBackend extends RBToolsAdapter {
         this.calls++; await this.gate;
         if (this.fail) { throw new Error('Offline'); }
         if (this.changeAccount) { this.account = 'changed'; }
-        return structuredClone(query['to-users-directly'] ? this.direct : this.group) as T[];
+        return structuredClone(query['from-user'] ? this.own : query['to-users-directly'] ? this.direct : this.group) as T[];
+    }
+    override async watch(ids: number[]): Promise<WatchResult> {
+        return { username: this.account, updates: ids.filter(id => !this.activityErrors.includes(id)).map(id => ({ ...this.lastActivity, id })),
+            errors: this.activityErrors.map(id => ({ id, code: 100, message: 'Unavailable' })) };
     }
 }
 
@@ -85,8 +93,44 @@ test('inbox only includes real direct/group assignments, and failure, cancellati
     await assert.rejects(session.refresh(identity.server), /Account changed/); assert.equal(storage.serialize(), before);
     backend.changeAccount = false; backend.account = identity.username;
     let release!: () => void; backend.gate = new Promise<void>(resolve => { release = resolve; });
-    const pending = session.refresh(identity.server); while (backend.calls < 8) { await new Promise(resolve => setImmediate(resolve)); }
+    const expectedCalls = backend.calls + 3, pending = session.refresh(identity.server); while (backend.calls < expectedCalls) { await new Promise(resolve => setImmediate(resolve)); }
     session.cancel(); release(); await assert.rejects(pending, /cancelled/); assert.equal(storage.serialize(), before);
+});
+
+test('comment and reply activity re-alerts once, own actions preserve read state, and issue-only changes remain visible', async () => {
+    const store = new InboxStore(new MemoryState()), backend = new InboxBackend(), session = new InboxSession(() => backend, store);
+    const boot = await session.refresh(identity.server); await store.mark(identity, boot.state.entries, true);
+    for (const type of ['review', 'reply']) {
+        backend.lastActivity = { ...backend.lastActivity, type, timestamp: type };
+        const result = await session.refresh(identity.server);
+        assert.equal(result.arrivals.length, 2); assert.equal(result.notices.length, 2);
+        assert(result.state.entries.every(entry => isUnread(result.state, entry)));
+        assert.equal((await session.refresh(identity.server)).notices.length, 0);
+        await store.mark(identity, result.state.entries, true);
+    }
+    backend.lastActivity = { ...backend.lastActivity, actor: identity.username, timestamp: 'own-review' };
+    const own = await session.refresh(identity.server); assert.equal(own.notices.length, 0);
+    assert(own.state.entries.every(entry => !isUnread(own.state, entry)));
+    Object.assign(backend.direct[0]!, { issue_resolved_count: 1 });
+    const issues = await session.refresh(identity.server); assert.equal(issues.notices.length, 1);
+    assert.equal(issues.notices[0]?.id, 1, 'An issue update with an unchanged last-activity stamp is still significant');
+    backend.lastActivity = { ...backend.lastActivity, actor: 'bob', timestamp: 'next' }; backend.activityErrors = [1];
+    const oldToken = issues.state.entries.find(entry => entry.id === 1)!.activityToken;
+    assert.equal((await session.refresh(identity.server)).state.entries.find(entry => entry.id === 1)!.activityToken, oldToken);
+    backend.activityErrors = [];
+    assert((await session.refresh(identity.server)).notices.some(entry => entry.id === 1), 'Recovery must announce the previously failed activity');
+});
+
+test('feedback on authored requests notifies after the silent bootstrap, without adding self-authored inbox assignments', async () => {
+    const store = new InboxStore(new MemoryState()), backend = new InboxBackend(), session = new InboxSession(() => backend, store);
+    backend.direct = []; backend.group = [];
+    backend.own = [request(10, { links: { ...request(10).links, submitter: { title: identity.username, href: identity.server + 'api/users/alice/' } } })];
+    assert.equal((await session.refresh(identity.server)).notices.length, 0);
+    backend.lastActivity = { ...backend.lastActivity, type: 'review', timestamp: 'review' };
+    const result = await session.refresh(identity.server); assert.equal(result.notices[0]?.id, 10); assert.equal(result.state.entries.length, 0);
+    assert.equal((await session.refresh(identity.server)).notices.length, 0);
+    backend.lastActivity = { ...backend.lastActivity, actor: identity.username, timestamp: 'own-reply' };
+    assert.equal((await session.refresh(identity.server)).notices.length, 0);
 });
 
 test('comment locations retain formal diff identity and reject interdiffs, foreign requests and absent ranges', () => {
@@ -94,6 +138,7 @@ test('comment locations retain formal diff identity and reject interdiffs, forei
     assert.deepEqual(commentLocation(comment, 1), { requestId: 1, revision: 2, fileId: 123, firstLine: 4, numLines: 2 });
     assert.equal(commentLocation(comment, 2), undefined);
     assert.equal(commentLocation({ ...comment, interfilediff: { id: 124 } }, 1), undefined);
+    assert.equal(commentLocation({ ...comment, base_filediff_id: 122 }, 1), undefined);
     assert.equal(commentLocation({ ...comment, first_line: 0 }, 1), undefined);
     const rendered = messageText({ key: '10', kind: 'diff', author: 'bob', timestamp: 'now', text: comment.text, issue: 'resolved', location: commentLocation(comment, 1) }, 1);
     assert(rendered.includes('Full\ntext')); assert(rendered.includes('v2')); assert(rendered.includes('resolved'));

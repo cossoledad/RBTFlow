@@ -6,7 +6,7 @@ import { RemoteComparison } from '../domain/comparison';
 import { RBToolsAdapter } from '../adapters/rbtools';
 
 export interface RemoteDocument { comparison: RemoteComparison; fileIndex: number; side: 'base' | 'head'; backend: RBToolsAdapter; }
-interface SnapshotEntry { load: () => Promise<Buffer>; remote?: RemoteDocument; cached?: Buffer; pending?: Promise<Buffer>; }
+interface SnapshotEntry { load: () => Promise<Buffer>; remote?: RemoteDocument; cached?: Buffer; pending?: Promise<Buffer>; live?: Buffer; mtime?: number; }
 
 export class SnapshotFiles implements vscode.FileSystemProvider {
     private readonly entries = new Map<string, SnapshotEntry>();
@@ -18,7 +18,7 @@ export class SnapshotFiles implements vscode.FileSystemProvider {
     watch(): vscode.Disposable { return new vscode.Disposable(() => {}); }
     async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
         const bytes = await this.readFile(uri);
-        return { type: vscode.FileType.File, ctime: 0, mtime: 0, size: bytes.byteLength, permissions: vscode.FilePermission.Readonly };
+        return { type: vscode.FileType.File, ctime: 0, mtime: this.entries.get(uri.toString())?.mtime ?? 0, size: bytes.byteLength, permissions: vscode.FilePermission.Readonly };
     }
     readDirectory(): [string, vscode.FileType][] { return []; }
     createDirectory(): void { throw vscode.FileSystemError.NoPermissions(); }
@@ -28,6 +28,7 @@ export class SnapshotFiles implements vscode.FileSystemProvider {
     async readFile(uri: vscode.Uri): Promise<Uint8Array> {
         const entry = this.entries.get(uri.toString());
         if (!entry) { throw vscode.FileSystemError.FileNotFound(uri); }
+        if (entry.live) { return entry.live; }
         if (entry.cached) { return entry.cached; }
         if (!entry.pending) {
             entry.pending = entry.load().then(bytes => {
@@ -73,6 +74,18 @@ export class SnapshotFiles implements vscode.FileSystemProvider {
         const uri = vscode.Uri.from({ scheme: 'rbtflow', path: `/${filename}`, query: `content=${encodeURIComponent(key)}` });
         if (!this.entries.has(uri.toString())) { this.entries.set(uri.toString(), { load }); }
         return uri;
+    }
+    liveContent(key: string, filename: string, bytes: Buffer): vscode.Uri {
+        const uri = vscode.Uri.from({ scheme: 'rbtflow', path: `/${filename}`, query: `live=${encodeURIComponent(key)}` });
+        if (!this.entries.has(uri.toString())) { this.entries.set(uri.toString(), { load: async () => bytes, live: Buffer.alloc(0) }); }
+        this.updateLiveContent(uri, bytes); return uri;
+    }
+    updateLiveContent(uri: vscode.Uri, bytes: Buffer): void {
+        const entry = this.entries.get(uri.toString());
+        if (!entry?.live || entry.live.equals(bytes)) { return; }
+        if (bytes.length > 16 * 1024 * 1024) { throw new Error('Comments exceed 16 MiB. Open this request in a browser.'); }
+        entry.live = bytes; entry.mtime = Math.max(Date.now(), (entry.mtime ?? 0) + 1);
+        this.changes.fire([{ type: vscode.FileChangeType.Changed, uri }]);
     }
     dispose(): void { this.entries.clear(); this.pairs.clear(); this.cachedBytes = 0; this.changes.dispose(); }
 }

@@ -1,14 +1,17 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
-    digest, DraftResource, Receipt, ReviewFields, ReviewPlan, ReviewResource, ReviewSnapshot,
+    CommitConflict, DiffMode, DraftResource, Receipt, ReviewFields, ReviewPlan, ReviewResource, ReviewSnapshot,
     ServerRepository, serverUrl,
 } from '../domain/model';
 import { ProcessError, runProcess } from './process';
 import { diffPrefix, LineMap, RemoteComparison, ReviewerDraft, ReviewComment } from '../domain/comparison';
+import { assertBoundCommit, bindingFor, bindingKey, fileSetHash, fullCommitId, readBinding, ReviewSafetyError, ServerDiff } from '../domain/submission';
+import { snapshotFingerprint } from '../domain/snapshot';
+import { PublicActivity, WatchResult } from '../domain/activity';
 
 export class ApiError extends Error {
-    constructor(message: string, readonly code: number, readonly notApplied = false) { super(message); }
+    constructor(message: string, readonly code: number, readonly notApplied = false, readonly brief?: string) { super(message); }
 }
 export interface RbtOptions {
     executable: string;
@@ -176,7 +179,29 @@ export class RBToolsAdapter {
         let draft: DraftResource | null = null;
         try { draft = (await this.api<{ draft: DraftResource }>(`/review-requests/${id}/draft/`, {}, signal)).draft; }
         catch (error) { if (!(error instanceof ApiError && error.code === 100)) { throw error; } }
-        return { review, draft, fingerprint: digest(JSON.stringify({ review, draft })) };
+        return { review, draft, fingerprint: snapshotFingerprint({ review, draft }) };
+    }
+    async requestMode(snapshot: ReviewSnapshot, signal?: AbortSignal): Promise<DiffMode> {
+        if (snapshot.review.created_with_history) { return 'history'; }
+        const marker = snapshot.draft?.extra_data.rbtflow_binding_version;
+        if (marker === 1 || marker === '1') { return 'bound'; }
+        const diffs = await this.list<ServerDiff>(`/review-requests/${snapshot.review.id}/diffs/`, 'diffs', {}, signal);
+        return diffs.sort((a, b) => b.revision - a.revision)[0]?.extra_data?.[bindingKey] ? 'bound' : 'squash';
+    }
+    async activity(id: number, signal?: AbortSignal): Promise<PublicActivity | undefined> {
+        try {
+            const data = await this.api<{ last_update: { type: string; timestamp: string; user?: string | { username?: string } } }>(`/review-requests/${id}/last-update/`, {}, signal);
+            const update = data.last_update;
+            return { id, type: update.type, timestamp: update.timestamp, actor: typeof update.user === 'string' ? update.user : update.user?.username ?? '' };
+        } catch (error) {
+            if (signal?.aborted) { throw error; }
+            this.options.log?.(`Activity unavailable for #${id}: ${String(error)}`); return;
+        }
+    }
+    /** One RBTools process/authentication context for the watch batch. */
+    async watch(ids: number[], selectedId?: number, signal?: AbortSignal): Promise<WatchResult> {
+        return JSON.parse((await this.command(['rbtflow-watch', '--json', '--disable-cache'], signal,
+            { '--fields-file': JSON.stringify({ ids, selected_id: selectedId }) })).toString('utf8')) as WatchResult;
     }
     async validatePeople(fields: ReviewFields, signal?: AbortSignal): Promise<void> {
         await Promise.all([
@@ -197,6 +222,7 @@ export class RBToolsAdapter {
             plan.input.mode === 'history' ? '--with-history' : '--squash-history',
             `--summary=${fields.summary.trim()}`,
             `--field=rbtflow_plan_id=${plan.id}`];
+        if (plan.bindingVersion) { args.push('--field=rbtflow_binding_version=1'); }
         if (plan.input.reviewId) { args.push('-r', String(plan.input.reviewId), `--change-description=${fields.changeDescription}`); }
         const result = JSON.parse((await this.command(args, signal, {
             '--description-file': fields.description, '--testing-done-file': fields.testing,
@@ -204,14 +230,54 @@ export class RBToolsAdapter {
         if (result.status !== 'success' || !Number.isSafeInteger(result.review_request_id)) { throw new Error('post 未返回有效审核单 ID；请检查服务器状态。'); }
         return result.review_request_id;
     }
-    async replaceFields(plan: ReviewPlan, fields: ReviewFields, id: number, signal?: AbortSignal): Promise<void> {
+    async commitRequests(plan: ReviewPlan, excludeId = plan.input.reviewId ?? 0, signal?: AbortSignal): Promise<CommitConflict['requests']> {
+        const result = JSON.parse((await this.command(['rbtflow-find-commit', '--json', '--disable-cache',
+            String(plan.repository.id), plan.git.head, String(excludeId)], signal)).toString('utf8')) as { username: string; requests: CommitConflict['requests'] };
+        if (result.username !== plan.username) { throw new ReviewSafetyError('Account changed. Sign in as the original author.'); }
+        return result.requests;
+    }
+    async replaceFields(plan: ReviewPlan, fields: ReviewFields, id: number, signal?: AbortSignal, expected?: ReviewSnapshot): Promise<void> {
         const values: Record<string, string> = { summary: fields.summary.trim(), description: fields.description,
             testing_done: fields.testing, target_people: fields.people.join(','), target_groups: fields.groups.join(','),
             bugs_closed: fields.bugs.join(','), branch: fields.branch, description_text_type: 'plain',
             testing_done_text_type: 'plain', 'extra_data.rbtflow_plan_id': plan.id };
         if (plan.previous?.review.public) { values.changedescription = fields.changeDescription; values.changedescription_text_type = 'plain'; }
-        await this.command(['rbtflow-sync-draft', '--json', '--disable-cache'], signal,
-            { '--fields-file': JSON.stringify(values) }, [String(id)]);
+        if (plan.bindingVersion) {
+            if (!fullCommitId(plan.git.head)) { throw new ReviewSafetyError('A full Git HEAD SHA is required. Preview again.'); }
+            const diffs = await this.list<ServerDiff>(`/review-requests/${id}/draft/diffs/`, 'diffs', {}, signal);
+            const diff = diffs.sort((a, b) => b.revision - a.revision)[0];
+            if (!diff) { throw new ReviewSafetyError('Uploaded diff is missing. Check the server.'); }
+            values.commit_id = plan.git.head;
+            values['extra_data.rbtflow_binding_version'] = '1';
+            values._binding = JSON.stringify(bindingFor(plan, diff));
+        }
+        if (expected) { values._request_updated = expected.review.last_updated; values._draft_updated = expected.draft?.last_updated ?? ''; }
+        const result = JSON.parse((await this.command(['rbtflow-sync-draft', '--json', '--disable-cache'], signal,
+            { '--fields-file': JSON.stringify(values) }, [String(id)])).toString('utf8')) as { error?: { code: number; message: string }; not_applied?: boolean };
+        if (result.error) {
+            const brief = values.commit_id ? result.error.code === 227 || result.error.code === 204
+                ? `HEAD is already linked to another request. Draft #${id} is preserved.`
+                : `Commit binding failed. Draft #${id} is preserved; see Output.` : undefined;
+            throw new ApiError(result.error.message, result.error.code, result.not_applied, brief);
+        }
+    }
+    async verifyUploaded(plan: ReviewPlan, id: number, published: boolean, signal?: AbortSignal): Promise<ServerDiff> {
+        const snapshot = await this.snapshot(id, signal), review = snapshot.review;
+        this.assertRepository(review, plan.repository.id);
+        if (review.status !== 'pending' || review.created_with_history !== (plan.input.mode === 'history') || review.links.submitter?.title !== plan.username) {
+            throw new ReviewSafetyError('The request author, status or diff mode changed. Check the server.');
+        }
+        const prefix = `/review-requests/${id}/${published ? '' : 'draft/'}diffs/`;
+        const diffs = await this.list<ServerDiff>(prefix, 'diffs', {}, signal), diff = diffs.sort((a, b) => b.revision - a.revision)[0];
+        if (!diff) { throw new ReviewSafetyError('The uploaded diff is missing. Check the server.'); }
+        const files = await this.list<{ dest_file: string; source_file: string }>(`${prefix}${diff.revision}/files/`, 'files', {}, signal);
+        if (fileSetHash(files.map(file => file.dest_file || file.source_file)) !== fileSetHash(plan.git.files.map(file => file.path))) {
+            throw new ReviewSafetyError('The uploaded files do not match the preview. Check the server.');
+        }
+        if (await this.patchHash(id, diff.revision, published ? 'published' : 'draft', signal) !== plan.patchHash) {
+            throw new ReviewSafetyError('The uploaded patch does not match the preview. Check the server.');
+        }
+        return diff;
     }
     async verify(plan: ReviewPlan, fields: ReviewFields, id: number, published: boolean, signal?: AbortSignal): Promise<Receipt> {
         const snapshot = await this.snapshot(id, signal);
@@ -220,24 +286,21 @@ export class RBToolsAdapter {
         if (review.status !== 'pending' || review.created_with_history !== (plan.input.mode === 'history')) { throw new Error('服务器审核状态/模式与计划不一致。'); }
         const details = published ? review : snapshot.draft;
         if (!details) { throw new Error('服务器缺少预期草稿。'); }
+        if (plan.bindingVersion && details.commit_id !== plan.git.head) { throw new ReviewSafetyError('Commit ID does not match the uploaded HEAD. Complete the draft binding.'); }
         const equal = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
         if (details.summary !== fields.summary.trim() || details.description !== fields.description || details.testing_done !== fields.testing ||
             details.branch !== fields.branch || !equal(details.bugs_closed, fields.bugs) ||
             !equal(details.target_people.map(p => p.title!), fields.people) || !equal(details.target_groups.map(g => g.title!), fields.groups) ||
             (!published && details.extra_data.rbtflow_plan_id !== plan.id)) { throw new Error('服务器字段与本次提交不一致，请检查草稿，避免重复提交。'); }
         if (published && (!review.public || snapshot.draft)) { throw new Error('审核单尚未完整发布。'); }
-        const prefix = `/review-requests/${id}/${published ? '' : 'draft/'}diffs/`;
-        const diffs = await this.list<{ revision: number }>(prefix, 'diffs', {}, signal);
-        const revision = Math.max(...diffs.map(diff => diff.revision));
-        if (!Number.isFinite(revision)) { throw new Error('服务器未保存 diff。'); }
-        const files = await this.list<{ dest_file: string; source_file: string; status: string }>(`${prefix}${revision}/files/`, 'files', {}, signal);
-        const actual = files.map(file => file.dest_file || file.source_file).sort();
-        const expected = plan.git.files.map(file => file.path).sort();
-        if (!equal(actual, expected)) { throw new Error('上传后的文件集合与预览不一致，请检查服务器 diff。'); }
-        const hash = JSON.parse((await this.command(['rbtflow-verify-patch', '--json', '--disable-cache',
-            String(id), String(revision), published ? 'published' : 'draft'], signal)).toString('utf8')) as { patch_hash: string };
-        if (hash.patch_hash !== plan.patchHash) { throw new Error('服务端保存的主 patch 与预览不一致，请检查服务器 diff。'); }
-        return { id, url: `${plan.server}r/${id}/`, diffRevision: revision, published,
+        const diff = await this.verifyUploaded(plan, id, published, signal);
+        if (plan.bindingVersion) {
+            const binding = readBinding(diff.extra_data?.[bindingKey]), expected = bindingFor(plan, diff);
+            if (!binding || Object.entries(expected).some(([key, value]) => binding[key as keyof typeof binding] !== value)) { throw new ReviewSafetyError('The uploaded diff has no matching HEAD binding. Check the server.'); }
+            assertBoundCommit(binding, details, diff);
+        }
+        if ((await this.snapshot(id, signal)).fingerprint !== snapshot.fingerprint) { throw new ReviewSafetyError('The request changed during verification. Check the server.'); }
+        return { id, url: `${plan.server}r/${id}/`, diffRevision: diff.revision, published,
             fingerprint: snapshot.fingerprint, verification: 'patch-and-metadata' };
     }
     assertRepository(review: ReviewResource, id: number): void {

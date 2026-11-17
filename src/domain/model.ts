@@ -18,12 +18,18 @@ export function serverUrl(value: string): string {
     return url.href.replace(/\/*$/, '/');
 }
 
+export type DiffMode = 'bound' | 'squash' | 'history';
+export const diffModes: { value: DiffMode; label: string; description: string }[] = [
+    { value: 'bound', label: 'Final diff + HEAD', description: 'Recommended · final diff with the real commit ID for CI' },
+    { value: 'squash', label: 'Squash diff', description: 'Final file diff without forcing a HEAD commit ID' },
+    { value: 'history', label: 'Commit history', description: 'Individual commits · requires a linear history' },
+];
 export interface ReviewInput {
     server: string;
     repositoryId: number | null;
     targetRef: string;
     baseRef: string; // Empty means merge-base(target, HEAD).
-    mode: 'squash' | 'history';
+    mode: DiffMode;
     reviewId: number | null;
 }
 
@@ -70,6 +76,7 @@ export interface ReviewResource {
     last_updated: string; summary: string; description: string; testing_done: string;
     branch: string; bugs_closed: string[]; target_people: Link[]; target_groups: Link[];
     extra_data: Record<string, unknown>; links: Record<string, Link>;
+    commit_id?: string | null;
 }
 export interface DraftResource extends Omit<ReviewResource, 'status' | 'created_with_history'> { changedescription: string; }
 export interface ReviewSnapshot {
@@ -89,6 +96,8 @@ export interface ReviewPlan {
     username: string;
     patchHash: string;
     previous: ReviewSnapshot | null;
+    /** Absent on journals created before the final-diff/HEAD binding contract. */
+    bindingVersion?: 1;
 }
 export interface Receipt {
     id: number; url: string; diffRevision: number; published: boolean;
@@ -96,6 +105,12 @@ export interface Receipt {
 }
 export interface PendingWrite {
     kind: 'post' | 'publish'; plan: ReviewPlan; fields: ReviewFields; id?: number;
+    bindingCheckpoint?: ReviewSnapshot;
+    commitConflict?: CommitConflict;
+}
+export interface CommitConflict {
+    server: string; username: string; repositoryId: number; head: string;
+    requests: { id: number; author: string; public: boolean; status: string }[];
 }
 
 export class PublishValidationError extends Error {

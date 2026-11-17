@@ -2,7 +2,7 @@
   "name": "rbtflow",
   "displayName": "RBTFlow",
   "description": "Native Review Board submission, comments, review inbox and diffs in VS Code.",
-  "version": "0.4.0",
+  "version": "0.6.1",
   "publisher": "ganjinbo",
   "license": "UNLICENSED",
   "private": true,
@@ -212,6 +212,11 @@
         "command": "rbtflow.markAllInboxRead",
         "title": "RBTFlow: Mark All as Read",
         "icon": "$(check-all)"
+      },
+      {
+        "command": "rbtflow.copyCommit",
+        "title": "RBTFlow: Copy Commit ID",
+        "icon": "$(copy)"
       }
     ],
     "viewsContainers": {
@@ -437,6 +442,10 @@
         {
           "command": "rbtflow.openCommentDiff",
           "when": "false"
+        },
+        {
+          "command": "rbtflow.copyCommit",
+          "when": "false"
         }
       ],
       "view/item/context": [
@@ -464,6 +473,11 @@
           "command": "rbtflow.showDiscussion",
           "when": "view == rbtflow.review && viewItem == rbtflow.discussion",
           "group": "inline@2"
+        },
+        {
+          "command": "rbtflow.showDiscussion",
+          "when": "view == rbtflow.review && viewItem == rbtflow.diffComment",
+          "group": "read@1"
         }
       ]
     },
@@ -491,7 +505,7 @@
         "rbtflow.notifications.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically refresh assigned reviews and notify about new requests or published content updates. The first sync is silent."
+          "description": "Refresh the inbox, current request and comments, and notify about assigned reviews or feedback on your requests. First sync is silent."
         },
         "rbtflow.notifications.pollIntervalSeconds": {
           "type": "number",
@@ -506,10 +520,10 @@
   "scripts": {
     "compile": "node scripts/compile.cjs",
     "watch": "tsc -p . --watch",
-    "test": "npm run compile && node --test build/extension/test/core.test.js build/extension/test/repository.test.js build/extension/test/collaboration-unit.test.js",
-    "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js build/extension/test/request.test.js build/extension/test/collaboration.test.js",
+    "test": "npm run compile && node --test build/extension/test/core.test.js build/extension/test/repository.test.js build/extension/test/collaboration-unit.test.js build/extension/test/submission-unit.test.js build/extension/test/refresh-unit.test.js build/extension/test/conflict-unit.test.js",
+    "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js build/extension/test/request.test.js build/extension/test/collaboration.test.js build/extension/test/submission.test.js",
     "test:host": "npm run compile && node scripts/test-host.cjs",
-    "package": "vsce package --skip-license --out build/rbtflow-0.4.0.vsix",
+    "package": "vsce package --skip-license --out build/rbtflow-0.6.1.vsix",
     "vscode:prepublish": "npm run icon && npm run compile",
     "icon": "node scripts/icon.cjs"
   },

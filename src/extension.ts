@@ -67,6 +67,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<RBTFlo
             await refresh(); const item = await vscode.window.showQuickPick(roots.map(value => ({ label: path.basename(value), description: value, value })), { title: 'Git repository' }); if (item) { return sidebar.open(item.value); }
         }),
         command('rbtflow.run', action => sidebar.run(action as Action)),
+        command('rbtflow.copyCommit', async value => { if (typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) { await vscode.env.clipboard.writeText(value); vscode.window.setStatusBarMessage('Commit SHA copied', 2500); } }),
         command('rbtflow.preview', async () => (await open())?.preview()),
         command('rbtflow.createDraft', async () => { await open(); await sidebar.createDraft(); }),
         command('rbtflow.publishRequest', async () => sidebar.current?.publishRequest()),

@@ -9,16 +9,18 @@ import { ReviewSession } from '../application/reviewSession';
 import { ReviewBrowser } from '../application/reviewBrowser';
 import { RequestSession, RequestWrite } from '../application/requestSession';
 import { PublishValidationError } from '../domain/model';
-import { FilePending, fields, git, input, labRoot, rbtPath, temporary } from './helpers';
+import { FilePending, fields, git, input, labPage, labRoot, rbtPath, temporary, uniqueFixtureHead } from './helpers';
 
 test('Git defaults, API 225 classification, legacy recovery and server-only draft editing/publication', { timeout: 120_000 }, async () => {
-    const dir = await temporary('request-'), checkout = path.join(dir, 'unrelated-checkout');
-    const factory = (server: string) => new RBToolsAdapter(labRoot, { executable: rbtPath, storage: dir, server });
+    const dir = await temporary('request-'), checkout = path.join(dir, 'unrelated-checkout'), root = path.join(dir, 'author');
+    await git(labRoot, 'worktree', 'add', '--detach', root, 'feature/merged');
+    await copyFile(path.join(labRoot, '.reviewboardrc'), path.join(root, '.reviewboardrc')); await uniqueFixtureHead(root);
+    const factory = (server: string) => new RBToolsAdapter(root, { executable: rbtPath, storage: dir, server });
     const adapter = factory(''), gitAdapter = new GitAdapter();
     const store = new FilePending(path.join(dir, 'post.json')); await store.initialize();
-    const session = new ReviewSession(labRoot, gitAdapter, factory, store), plan = await session.preview(input);
-    const raw = await gitAdapter.commitMessage(labRoot, plan.git.base, plan.git.head), guessed = await adapter.guessMessage(raw);
-    const firstSubject = (await git(labRoot, 'log', '--reverse', '--format=%s', `${plan.git.base}..${plan.git.head}`)).toString().split('\n')[0];
+    const session = new ReviewSession(root, gitAdapter, factory, store), plan = await session.preview(input);
+    const raw = await gitAdapter.commitMessage(root, plan.git.base, plan.git.head), guessed = await adapter.guessMessage(raw);
+    const firstSubject = (await git(root, 'log', '--reverse', '--format=%s', `${plan.git.base}..${plan.git.head}`)).toString().split('\n')[0];
     assert.equal(guessed.summary, firstSubject); assert(guessed.description?.trim());
     const noReviewers = { ...fields, summary: guessed.summary!, description: guessed.description!, people: [], groups: [] };
     const saved = await session.post(plan.id, plan.input, noReviewers);
@@ -45,6 +47,11 @@ test('Git defaults, API 225 classification, legacy recovery and server-only draf
     class Rejected extends RBToolsAdapter { override async publish(): Promise<void> { throw new ApiError('Injected definitive publish rejection', 225); } }
     const rejected = new RequestSession(server => new Rejected(checkout, { executable: rbtPath, storage: dir, server }), journal);
     await assert.rejects(rejected.publish(updated), /definitive/); assert.equal(pending, undefined);
+    const beforeVisit = await remoteFactory(plan.server).snapshot(saved.id);
+    assert.equal(await labPage(saved.id), 200);
+    const afterVisit = await remoteFactory(plan.server).snapshot(saved.id);
+    assert.equal(afterVisit.review.extra_data.calculated_trophies, true);
+    assert.equal(beforeVisit.fingerprint, afterVisit.fingerprint, 'A read-only browser visit must not invalidate publication');
     assert.equal((await request.publish(updated)).published, true);
     const published = await browser.open(plan.server, saved.id); assert.equal(published.selected.scope, 'published');
     await request.edit(published, { bugs: ['METADATA-2'] });
@@ -60,4 +67,5 @@ test('Git defaults, API 225 classification, legacy recovery and server-only draf
     await assert.rejects(lost.publish(metadataOnly), /lost publish/); assert(pending);
     assert.equal((await new RequestSession(remoteFactory, journal).reconcile())?.published, true); assert.equal(pending, undefined);
     await git(labRoot, 'worktree', 'remove', '--force', checkout);
+    await git(labRoot, 'worktree', 'remove', '--force', root);
 });

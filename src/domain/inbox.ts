@@ -1,13 +1,17 @@
 import { digest, ReviewResource } from './model';
+import { activityToken, PublicActivity } from './activity';
 
 export interface InboxIdentity { server: string; username: string; }
 export interface InboxEntry {
     id: number; summary: string; author: string; repository: string; updatedAt: string;
     revision?: number; fingerprint: string; viaGroup: boolean;
+    contentFingerprint?: string; activityToken?: string; activity?: PublicActivity;
 }
+export interface WatchedRequest { content: string; token: string; activity?: PublicActivity; }
 export interface InboxState {
     identity: InboxIdentity; initialized: boolean; entries: InboxEntry[];
     read: Record<string, string[]>; announced: Record<string, string>; lastSync?: string;
+    watched?: Record<string, WatchedRequest>;
 }
 export function inboxKey(identity: InboxIdentity): string { return digest(JSON.stringify([identity.server, identity.username])); }
 export function emptyInbox(identity: InboxIdentity): InboxState { return { identity, initialized: false, entries: [], read: {}, announced: {} }; }
@@ -19,13 +23,14 @@ export function inboxFingerprint(review: ReviewResource): string {
     const links = (values: { href: string }[]) => values.map(value => new URL(value.href).pathname).sort();
     return digest(JSON.stringify({ id: review.id, summary: review.summary, description: review.description, testing: review.testing_done,
         branch: review.branch, bugs: [...review.bugs_closed].sort(), people: links(review.target_people), groups: links(review.target_groups),
-        revision: requestRevision(review), repository: review.links.repository?.href && new URL(review.links.repository.href).pathname }));
+        revision: requestRevision(review), commit: review.commit_id, repository: review.links.repository?.href && new URL(review.links.repository.href).pathname }));
 }
-export function inboxEntry(review: ReviewResource, viaGroup: boolean): InboxEntry {
+export function inboxEntry(review: ReviewResource, viaGroup: boolean, activity?: PublicActivity, previousToken?: string): InboxEntry {
     if (!Number.isSafeInteger(review.id) || review.id < 1) { throw new Error('Invalid request in inbox response.'); }
+    const contentFingerprint = inboxFingerprint(review), token = activity ? activityToken(review, activity) : previousToken;
     return { id: review.id, summary: review.summary, author: review.links.submitter?.title ?? 'Unknown',
         repository: review.links.repository?.title ?? '', updatedAt: review.last_updated, revision: requestRevision(review),
-        fingerprint: inboxFingerprint(review), viaGroup };
+        fingerprint: token ? digest(JSON.stringify([contentFingerprint, token])) : contentFingerprint, contentFingerprint, activityToken: token, activity, viaGroup };
 }
 export function isUnread(state: InboxState, entry: InboxEntry): boolean { return !state.read[String(entry.id)]?.includes(entry.fingerprint); }
 export function sortInbox(state: InboxState): InboxEntry[] {

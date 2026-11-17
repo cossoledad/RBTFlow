@@ -1,4 +1,4 @@
-# RBTFlow 0.4.0
+# RBTFlow 0.6.1 (development)
 
 全部交互使用 VS Code 原生控件，默认简短英文。没有 Webview、HTML 输入框、select 或自绘折叠区域。
 运行时复用工作区机器上的 Git/RBTools，连接现有 Review Board；本地站点只供开发，不使用 Docker。
@@ -7,7 +7,7 @@
 
 | 视图 | 职责 | 输入方式 |
 | --- | --- | --- |
-| Submit | 当前分支、目标主线、审批人/组、Bug、提交信息；预览、生成新草稿 | Quick Pick、Input Box、原生编辑器 |
+| Submit | 当前分支、目标主线、冻结 BASE/HEAD、审批人/组、Bug、提交信息；预览、生成新草稿 | Quick Pick、Input Box、原生编辑器 |
 | Inbox | 当前连接的待审请求、未读优先、原生通知、阅读状态 | TreeView、原生通知、上下文菜单 |
 | Review | 选中的服务器审核单：版本、元数据、发布、更新差异、审阅、浏览器、恢复 | Quick Pick、Input Box、原生编辑器、原生复选框/评论 |
 | Changes | 当前预览或选中审核单的文件，目录树/列表切换、原生 diff、只读原始 patch | 原生 TreeView / readonly FileSystemProvider |
@@ -18,6 +18,11 @@
 **常见提交**：在 Submit 选择 Target / Reviewers / Bugs → Preview Changes → 在 Changes 检查 → Create Draft。
 生成后自动加载服务器版本到 Review，Submit 清除本次标题、说明和单号，沿用仓库默认配置准备下一次提交。
 Publish Request、编辑服务器详情、更新已有差异、浏览器入口均不再由 Submit 承担。
+
+Repository Settings → Diff mode 提供三种模式，按仓库保存：Final diff + HEAD（默认）、Squash diff、Commit history。
+前两者使用最终汇总差异；只有默认模式强制绑定完整 HEAD，History 要求服务支持且提交链线性、无空提交。
+预览的 BASE/HEAD 和服务器 Commit 可复制；Draft.branch 保存选择的完整目标引用，例如 origin/main。
+绑定/发布核对、部分写入恢复和旧 History 单规则见 [最终 Diff 与 HEAD 绑定](final-diff.md)。
 
 标题和说明使用固定 BASE..HEAD 的 Git log，顺序和格式与 RBTools GitClient 相同，并调用 rbt 自己的
 `parse_commit_message`（包含项目配置的 COMMIT_MESSAGE_PARSER）。说明为空时回退到生成的标题，满足服务端必填要求。
@@ -43,16 +48,18 @@ Comment 使用原生编辑器，Ctrl+S 保存本地总体意见；Ship It 是原
 ## 评论阅读与待审通知
 
 Review → Comments 是原生可展开的评论列表，按审阅人/回复分组；包含公开总体意见的头尾、general/diff/file-attachment/screenshot 评论和公开回复。
-显示作者、时间、Ship It、文件/差异版本和 issue 状态。点击项目打开只读全文，View All Comments 读取完整公开讨论，保留多行内容。
+显示作者、时间、Ship It、文件/差异版本和 issue 状态。点击行内评论直接定位差异并展开原生线程；其他项目打开只读全文。行内评论菜单也可阅读全文，View All Comments 读取完整公开讨论。
 先读取审阅列表，展开时读取对应评论/回复，使用已有 RBTools 认证和分页/容量限制；失败记录日志并允许 Refresh Comments 重试。
 私有审阅和未发布回复不显示。附件/截图只显示评论文字，不下载图片或自动打开评论中的链接。
-行内评论的 Open Comment in Diff 使用 filediff ID、版本和服务器虚拟行映射定位历史文件；interdiff 评论只读，不推测行位置。
+行内评论使用 filediff ID、版本和统一服务器行映射定位；删除行聚焦原始侧。公开回复在原生线程中跟随父评论分组，显示作者、时间和 issue 状态。
+当前版本内定位不重载审核或覆盖本地意见；历史版本只读，添加意见/Ship It 使用最新已发布版本。
+interdiff 评论只读，不推测行位置。
 历史文件元数据读取失败不隐藏评论正文，会标识 File unavailable。
 
 Inbox 只列当前连接中直接或通过审批组分配给当前登录用户的公开 pending 请求，排除本人提交、仅加星和已关闭请求。
 范围是该服务器的待审列表，不限于当前 Git 仓库；多根工作区跟随当前选中仓库的连接，后台不并行扫描其他服务器。
 自动刷新默认每 60 秒，范围 30–3600 秒，可在 Repository Settings 或 VS Code 配置中关闭/调整；每仓库设置优先。
-第一次同步静默，之后的新分配或发布内容变化合并为一次原生通知；请求标题/说明/目标/最新 diff 等形成指纹，仅活动时间变化不会重新提醒。
+第一次同步静默，之后的新分配、公开评论/回复、发布字段、新 Diff 和审批/issue 统计变化合并为原生通知；相同活动去重，自己的公开审阅动作不反复提醒。
 网络或认证失败保留已知列表、显示简短离线提示并写 Output，失败不会生成空列表或虚假通知；切换连接时清除旧界面并重新静默同步。
 这是工作区打开期间的轮询，不是服务端推送，也不会在 VS Code 退出后接收通知。
 
@@ -61,10 +68,27 @@ Inbox 只列当前连接中直接或通过审批组分配给当前登录用户�
 阅读记录保存在 globalState，按服务器 + 登录账号隔离，在同一扩展 profile/宿主内跨仓库共享；不写入服务器，也不与浏览器阅读状态同步。
 阅读不代表 Ship It；审批仍使用 Review 原有的意见、Ship It、Save Review / Publish Review 流程。
 
+## 自动刷新与外部编辑
+
+默认每 60 秒刷新；窗口重新获得焦点也会检查，关闭自动刷新后手动 Refresh Inbox 仍可刷新当前请求。
+分配给自己的待审单与自己发布的 pending 请求通过 last-update 检测公开评论、回复、Diff 和元数据活动；审批/issue 计数补充变化检测。
+自己发布的请求收到反馈也会通知，但当前 Inbox 列表仍只列直接/组分配，统一活动队列属于后续规划。
+首次同步静默，按服务器/账号去重，自己的公开审阅动作不会反复通知；读取失败不推进活动游标。
+当前选中请求还回读自身可见的私有请求/审阅草稿；不会探测别人的私有请求草稿。
+
+同版本后台更新保持 comparison ID、只读代码、打开的本地输入及意见；刷新 Comments 树、已显示行内线程和打开的 View All Comments 文档。
+单条评论全文仍是只读快照。新 Diff 提示 Open latest，确认前保留旧代码并阻止发布/审阅写入。
+打开的描述字段若被网页改动，其后保存会阻止覆盖，保留输入文本；其他字段变化可回读后合并保存。
+外部私有审阅草稿变化且存在本地意见时，保留本地意见并要求 Reload。
+
+浏览器仅访问草稿会在本地 Review Board 7.0.6 添加 extra_data.calculated_trophies 缓存。
+校验忽略这个已确认缓存、只读统计和链接展示字段，规范化无序集合；标题、说明、审批人身份、未知扩展字段、时间、状态与提交身份仍受保护。
+旧待确认日志重新按实际内容计算，上传/发布继续独立校验 patch、文件集合和 HEAD。
+这些前后校验不等于跨 API 的服务器原子事务。
+
 ## 发布失败与日志
 
-本次用户报告的 #60 经本地服务回读，草稿审批人/组为空，description 也为空。
-服务端要求至少一个审批人或组，以及非空标题和说明；原实现又将明确拒绝误留在未知写操作状态。
+服务端发布要求至少一个审批人或组，以及非空标题和说明。明确拒绝和未知写入结果分别处理。
 
 现在分开处理：
 
@@ -75,11 +99,18 @@ Inbox 只列当前连接中直接或通过审批组分配给当前登录用户�
 
 发布 RPC 通过小型 RBTools bridge 保留结构化 API error code，避免只解析 `rbt publish` 的长文本报错。
 真实 API 225 已验证为 ApiError，发布后的网络丢失也有故障注入恢复测试。
-原始的 #60 没有被测试自动发布或改写；新的流程在隔离测试请求上验证。
+测试只在隔离请求/合成 Git 仓库验证，不改写用户审核单。
 
 所有详细诊断在 **Output → RBTFlow**（LogOutputChannel），包含命令、范围、结果、stdout/stderr。
 界面只用原生简短英文通知，不显示堆栈、长 URL、日志卡片或待确认说明面板。
 确需人工接管部分写入时，Review 菜单仅在有待确认记录时提供 Clear Recovery Record，使用原生选择和确认后清除。
+
+## HEAD 占用冲突
+
+Final diff + HEAD 在预览和上传前查找同仓库、同 SHA 已有审核单以及自己的私有草稿。已有关联时 Review 提供 Open existing，不再创建另一份失败草稿。
+明确的 API 227 和旧版本留下的部分上传记录会被识别为占用冲突，隐藏 Complete draft；Check server 只重新检查，不重复绑定写入。
+Open existing 或 Keep draft and continue 会先保存完整本地恢复归档，再解除当前阻塞。服务器上的失败草稿和已有审核单都保留；打开后是否更新或发布仍由用户明确操作。
+不可见的占用者不泄露单号；冲突缓存按服务器、账号、仓库、HEAD 区分。详细合同见 [提交与恢复](final-diff.md#commit-conflicts-and-recovery-061)。
 
 ## 缓存和认证
 
@@ -89,7 +120,7 @@ Inbox 只列当前连接中直接或通过审批组分配给当前登录用户�
 
 | 状态 | 保存范围 |
 | --- | --- |
-| 默认值 | 服务器/仓库 ID、目标主线、BASE、模式、审批人/组、Bug、分支标签 |
+| 默认值 | 服务器/仓库 ID、目标主线、BASE、Diff mode、审批人/组、Bug |
 | 提交信息 | 当前本地草稿、绑定 HEAD 的自定义标题/说明；生成后清空一次性内容 |
 | 工具 | 每仓库 rbt 路径和超时，未设置则用 VS Code 配置 |
 | 通知设置 | 每仓库开关和轮询间隔，未设置则用 VS Code 配置 |
@@ -102,7 +133,7 @@ Inbox 只列当前连接中直接或通过审批组分配给当前登录用户�
 浏览他人或载入服务器字段不会覆盖自己的提交配置；显式为自己的请求选择审批人/Bug 后更新仓库默认值。
 初次可从 .reviewboardrc / RBTools 配置读取 URL、tracking branch、审批人/组。
 服务器仓库优先明确选择、配置中的 REPOSITORY，再匹配 Git remote。
-服务器 URL、BASE、模式等低频内容在 Repository Settings 中。
+服务器 URL、BASE、Diff mode 等低频内容在 Repository Settings 中。0.5 缓存的统一模式迁为 Final diff + HEAD；更早的显式模式选择保留，待确认写入日志不改动。
 
 | VS Code 设置 | 默认 | 用途 |
 | --- | --- | --- |
@@ -119,7 +150,7 @@ Inbox 只列当前连接中直接或通过审批组分配给当前登录用户�
 ## 数据与写操作合同
 
 本地提交范围仍是 merge-base(target, HEAD) → HEAD；显式 BASE 必须是祖先。
-merge 分支使用汇总 diff，不重写 Git 历史，保留侧分支和冲突解决；逐提交模式要求连续线性、无空提交。
+默认使用最终汇总 Diff + HEAD，不重写 Git 历史，保留侧分支和冲突解决；显式 History 及旧 History 单的更新要求连续线性、无空提交。已有 History 单保留原模式；绑定过 HEAD 的单不允许降级为普通 Squash。
 工作区未提交内容排除；merge/rebase/cherry-pick 未结束时拒绝新预览。
 
 ReviewPlan 固定 worktree/common-dir、SHA、Git/remote 指纹、工具和服务版本、repository ID、主 patch hash、旧单快照。
@@ -128,6 +159,8 @@ ReviewPlan 固定 worktree/common-dir、SHA、Git/remote 指纹、工具和服�
 
 RequestSession 负责服务器页面元数据和发布：核对作者、pending 状态、快照、最新差异 ID/hash、字段，
 写前持久化 journal，写后回读；发布不要求本地分支仍处于上传时的位置。
+新流程还根据 diff 绑定记录核对真实 HEAD、目标引用、仓库和文件集合；发布后的 Commit ID 同样验证。
+绑定失败保留单号和检查点，可显式 Complete draft 完成同一 Diff，绝不自动重新 post。
 保存元数据时保留测试说明/分支等未编辑字段。Python bridge 额外检查 request/draft 的 last_updated。
 这些检查不是服务端原子 CAS，仍存在检查与写入之间的并发窗口。
 
@@ -148,7 +181,7 @@ bash dev.sh watch
 bash dev.sh test          # 核心、缓存、通知并发/隔离、评论读取
 bash dev.sh integration   # 真实提交、跨用户审阅、服务器草稿和发布恢复
 bash dev.sh host-smoke    # 原生 VS Code 控件验收，自动准备所需本地数据
-bash dev.sh package       # build/rbtflow-0.4.0.vsix
+bash dev.sh package       # build/rbtflow-0.6.1.vsix
 ```
 
 F5 选择 Run RBTFlow (local lab)；成品扩展标识为 ganjinbo.rbtflow，也可使用 Extensions: Install from VSIX。
@@ -166,7 +199,7 @@ RBTools 7.0 / Review Board 7.0.6；公司版本、SSO/代理/证书仍需试点�
 | src/views/changesTree.ts / src/domain/fileTree.ts | 目录树/列表，保留原文件索引和评论身份 |
 | src/views/snapshots.ts / reviewComments.ts | 只读文档和原生行内评论 |
 | src/application/repositoryStore.ts | 缓存、迁移和默认值 |
-| src/application/reviewSession.ts | 固定范围、上传、旧发布状态兼容恢复 |
+| src/application/reviewSession.ts / src/domain/submission.ts | 最终 diff/HEAD 绑定、上传校验、检查点与恢复 |
 | src/application/requestSession.ts | 服务器页面编辑、发布、结构化拒绝和 journal 恢复 |
 | src/application/reviewBrowser.ts / feedbackSession.ts | 远程版本、审阅写操作 |
 | src/application/inboxSession.ts / discussionSession.ts | 待审 API、串行本地阅读记录、公开评论/回复读取 |
@@ -174,7 +207,7 @@ RBTools 7.0 / Review Board 7.0.6；公司版本、SSO/代理/证书仍需试点�
 | src/adapters / python/rbtflow_bridge.py | Git、进程、RBTools/认证及精确服务器操作 |
 
 2026-11-16 在 Git 2.53.0 / Node 26.7.0 / TypeScript 7.0.2 / VS Code 1.136.1 上验证。
-0.4.0 验证覆盖 16 项核心检查、6 组真实集成和 18 项真实 Extension Host 检查。
+0.4.0 基线曾覆盖 16 项核心、6 组真实集成和 18 项 Extension Host 检查。0.5 的绑定基线见 final-diff.md；0.6 验证见 build/verification-v6.json。
 Host 使用隔离 profile 和带真实嵌套/Unicode 文件的临时 worktree，覆盖原生多选框确认审批人后发布、
 Git 默认信息、草稿交接、服务器说明连续保存、目录树/列表、readonly patch 原生打字/写入拒绝、
 原生编辑器/复选框/评论、缓存恢复及另一作者的审阅发布；新增公开评论/四类回复只读阅读、
@@ -192,3 +225,8 @@ build/host/latest.json、build/package-validation-v4.json。
 
 尚未实现回复写入、issue 生命周期操作、附件上传/图片预览、interdiff 对比、merge/land/push、未提交内容审核；
 Windows/macOS、所有主题/快捷键、公司服务兼容和大仓库容量未完成验收。
+
+## 当前补齐方向
+
+从开发者/审阅者的具体工作闭环评估当前能力、剩余网页依赖及分批验收，见 [网页版替代范围与规划](web-parity.md)。
+0.6 的本地验证证据与限制记录在 build/verification-v6.json；该文件不随 VSIX 分发。

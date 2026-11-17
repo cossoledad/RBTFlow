@@ -98,6 +98,7 @@ test('published/draft comparisons, another reviewer, exact inline rows, approval
     const restored = new FeedbackSession(reviewer, store);
     assert((await restored.reconcile())?.id); assert.equal(store.load(), undefined);
     const alternatePending = new FilePending(path.join(dir, 'reviewer-post.json')); await alternatePending.initialize();
+    await git(root, 'commit', '--allow-empty', '-m', `Separate incoming review ${randomUUID()}`);
     const alternate = new ReviewSession(root, new GitAdapter(), reviewer, alternatePending);
     const alternatePlan = await alternate.preview({ ...input, baseRef: base });
     const alternateFields = { ...fields, summary: 'Review another author in the VS Code sidebar' };

@@ -1,6 +1,7 @@
 """RBTools extension commands, loaded into rbt's own Python environment."""
 import hashlib
 import json
+import re
 import base64
 
 from rbtools.commands.base import BaseCommand, CommandError, Option
@@ -100,15 +101,49 @@ class SyncDraft(BaseCommand):
     option_list = [BaseCommand.server_options, Option("--fields-file", dest="fields_file")]
 
     def main(self, review_request_id):
+        from rbtools.api.errors import APIError
         with open(self.options.fields_file, encoding="utf-8") as stream:
             data = json.load(stream)
         allowed = {"summary", "description", "testing_done", "target_people", "target_groups",
                    "bugs_closed", "branch", "changedescription", "description_text_type",
-                   "testing_done_text_type", "changedescription_text_type", "extra_data.rbtflow_plan_id"}
+                   "testing_done_text_type", "changedescription_text_type", "extra_data.rbtflow_plan_id",
+                   "commit_id", "extra_data.rbtflow_binding_version", "_binding", "_request_updated", "_draft_updated"}
         if set(data) - allowed or not all(isinstance(value, str) for value in data.values()):
             raise CommandError("Invalid RBTFlow draft fields")
-        review = self.api_root.get_review_request(review_request_id=int(review_request_id))
-        review.get_draft().update(**data)
+        binding = json.loads(data.pop('_binding')) if '_binding' in data else None
+        request_updated = data.pop('_request_updated', None)
+        draft_updated = data.pop('_draft_updated', None)
+        commit_id = data.get('commit_id')
+        if commit_id is not None and not re.fullmatch(r'(?:[a-f0-9]{40}|[a-f0-9]{64})', commit_id):
+            raise CommandError('A full Git HEAD SHA is required')
+        if binding is not None:
+            required = {'version', 'planId', 'head', 'repositoryId', 'targetBranch', 'diffId', 'revision', 'patchHash', 'filesHash'}
+            if (not isinstance(binding, dict) or set(binding) != required or binding['version'] != 1 or binding['head'] != commit_id
+                    or binding['targetBranch'] != data.get('branch') or binding['planId'] != data.get('extra_data.rbtflow_plan_id')
+                    or not all(isinstance(binding[key], int) and binding[key] > 0 for key in ('repositoryId', 'diffId', 'revision'))):
+                raise CommandError('Invalid RBTFlow commit binding')
+        try:
+            review = self.api_root.get_review_request(review_request_id=int(review_request_id))
+            draft = review.get_draft()
+            if request_updated is not None and (review.last_updated != request_updated or draft.last_updated != draft_updated):
+                self.json.add('error', {'code': 409, 'message': 'Draft changed; check the server before continuing'})
+                self.json.add('not_applied', True)
+                return
+            if binding is not None:
+                if review.created_with_history:
+                    raise CommandError('Cannot convert a history review request')
+                diff = self.api_client.get_path(f'/review-requests/{int(review_request_id)}/draft/diffs/{int(binding["revision"])}/')
+                if diff.id != binding['diffId']:
+                    raise CommandError('Uploaded diff changed')
+                # Store the artifact binding on the diff itself: unlike arbitrary
+                # draft extra_data, diff metadata survives publication unchanged.
+                # Write it before the native commit field so a rejected binding
+                # leaves the request checkpoint intact for explicit recovery.
+                diff.update(**{'extra_data.rbtflow_binding_v1': json.dumps(binding, separators=(',', ':'))})
+            draft.update(**data, update_from_commit_id=False)
+        except APIError as error:
+            self.json.add('error', {'code': error.error_code, 'message': str(error)})
+            return
         self.json.add("review_request_id", review.id)
 
 
@@ -129,6 +164,139 @@ class VerifyPatch(BaseCommand):
             data = data.encode("utf-8")
         # rbt diff adds a console newline which is absent in the API patch.
         self.json.add("patch_hash", hashlib.sha256(data.rstrip(b"\n")).hexdigest())
+
+
+class FindCommitRequests(BaseCommand):
+    """Find public commit owners and our own drafts; never probe others' drafts."""
+    name = 'rbtflow-find-commit'
+    needs_api = True
+    args = '<repository-id> <head> <exclude-id>'
+    option_list = [BaseCommand.server_options]
+
+    def main(self, repository_id, head, exclude_id):
+        from rbtools.api.errors import APIError
+        repository_id, exclude_id = int(repository_id), int(exclude_id)
+        if repository_id < 1 or exclude_id < 0 or not re.fullmatch(r'(?:[a-f0-9]{40}|[a-f0-9]{64})', head):
+            raise CommandError('Invalid commit lookup')
+        session = self.api_root.get_session().rsp['session']
+        username = session.get('links', {}).get('user', {}).get('title')
+        if not session.get('authenticated') or not username:
+            raise CommandError('Sign in before checking commit ownership')
+        self.json.add('username', username)
+
+        def requests(**query):
+            start = 0
+            while True:
+                page = self.api_client.get_path('/review-requests/', **{
+                    'repository': repository_id, 'status': 'all', 'max-results': 200, 'start': start, **query}).rsp
+                values = page['review_requests']
+                yield from values
+                start += len(values)
+                if start >= page.get('total_results', start):
+                    return
+                if not values or start >= 10000:
+                    raise CommandError('Commit lookup exceeds the pagination limit')
+
+        found = {}
+
+        def add(review):
+            author = review['links'].get('submitter', {}).get('title', '')
+            if review['id'] != exclude_id and (review['public'] or author == username):
+                found[review['id']] = {'id': review['id'], 'public': review['public'], 'status': review['status'],
+                                       'author': author}
+
+        for review in requests(**{'commit-id': head}):
+            if review.get('commit_id') == head:
+                add(review)
+        # The commit-id query filters the public database column, not draft.commit_id.
+        if not found:
+            for review in requests(**{'from-user': username}):
+                if review['id'] == exclude_id or review['links'].get('submitter', {}).get('title') != username:
+                    continue
+                try:
+                    draft = self.api_client.get_path(f'/review-requests/{review["id"]}/draft/').rsp['draft']
+                except APIError as error:
+                    if error.error_code != 100:
+                        raise
+                    continue
+                if draft.get('commit_id') == head:
+                    add(review)
+        self.json.add('requests', list(found.values()))
+
+
+class WatchUpdates(BaseCommand):
+    """Read activity in one authenticated process, without touching any drafts."""
+    name = 'rbtflow-watch'
+    needs_api = True
+    option_list = [BaseCommand.server_options, Option('--fields-file', dest='fields_file')]
+
+    def main(self):
+        from rbtools.api.errors import APIError
+        with open(self.options.fields_file, encoding='utf-8') as stream:
+            data = json.load(stream)
+        ids = data.get('ids', [])
+        selected_id = data.get('selected_id')
+        if (set(data) - {'ids', 'selected_id'} or not isinstance(ids, list) or len(ids) > 10000
+                or any(type(value) is not int or value < 1 for value in ids)
+                or (selected_id is not None and (type(selected_id) is not int or selected_id < 1))):
+            raise CommandError('Invalid watch targets')
+        session = self.api_root.get_session().rsp['session']
+        username = session.get('links', {}).get('user', {}).get('title')
+        if not session.get('authenticated') or not username:
+            raise CommandError('Sign in before refreshing reviews')
+        self.json.add('username', username)
+        errors = []
+
+        def get(path, key):
+            return self.api_client.get_path(path).rsp[key]
+
+        def items(path, key):
+            result = []
+            while True:
+                page = self.api_client.get_path(path, **{'max-results': 200, 'start': len(result)}).rsp
+                values = page[key]
+                result.extend(values)
+                if len(result) >= page.get('total_results', len(result)):
+                    return result
+                if not values or len(result) >= 10000:
+                    raise CommandError('Watch collection exceeds the pagination limit')
+
+        def optional(path, key):
+            try:
+                return get(path, key)
+            except APIError as error:
+                if error.error_code != 100:
+                    raise
+                return None
+
+        def activity(request_id):
+            try:
+                value = get(f'/review-requests/{request_id}/last-update/', 'last_update')
+                user = value.get('user') or {}
+                return {'id': request_id, 'type': value['type'], 'timestamp': value['timestamp'],
+                        'actor': user if isinstance(user, str) else user.get('username', '')}
+            except APIError as error:
+                errors.append({'id': request_id, 'code': error.error_code, 'message': str(error)})
+                return None
+
+        updates = [value for request_id in dict.fromkeys(ids) if (value := activity(request_id)) is not None]
+        self.json.add('updates', updates)
+        if selected_id is not None:
+            prefix = f'/review-requests/{selected_id}/'
+            review = get(prefix, 'review_request')
+            # Keep the same private-draft boundary as ReviewBrowser, including for administrators.
+            own = review.get('links', {}).get('submitter', {}).get('title') == username
+            draft = optional(prefix + 'draft/', 'draft') if own else None
+            versions = [{**value, 'scope': 'published'} for value in items(prefix + 'diffs/', 'diffs')]
+            if draft:
+                versions.extend({**value, 'scope': 'draft'} for value in items(prefix + 'draft/diffs/', 'diffs'))
+            reviewer_draft = optional(prefix + 'reviews/draft/', 'review') if review['public'] else None
+            comments = items(prefix + f'reviews/{reviewer_draft["id"]}/diff-comments/', 'diff_comments') if reviewer_draft else []
+            self.json.add('selected', {'review': review, 'draft': draft,
+                'versions': [{'scope': value['scope'], 'id': value['id'], 'revision': value['revision']} for value in versions],
+                'reviewerDraft': reviewer_draft, 'reviewerComments': comments,
+                'activity': activity(selected_id) if review['public'] else None})
+        self.json.add('errors', errors)
 
 
 class ReadComparison(BaseCommand):

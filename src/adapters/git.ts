@@ -96,6 +96,7 @@ export class GitAdapter {
         }
         const dirty = (await this.run(root, ['status', '--porcelain=v1', '-z'], signal)).length > 0;
         const warnings = ['目标主线使用本地引用；需要时请在 Git 中显式 fetch 后重新预览。'];
+        if (base !== target) { warnings.push('目标分支已超出共同基线；审核仍使用 BASE → HEAD，合并前请核对目标分支的新改动。'); }
         if (dirty) { warnings.push('工作区或暂存区有修改；本次只包含已提交内容。'); }
         if (merges) { warnings.push(`范围包含 ${merges} 个 merge commit；汇总差异包含侧分支和冲突解决结果。`); }
         if (branch === '(detached HEAD)') { warnings.push('当前处于 detached HEAD；提交时仍使用固定 SHA。'); }

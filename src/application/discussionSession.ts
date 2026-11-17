@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { RBToolsAdapter } from '../adapters/rbtools';
 import { RemoteComparison } from '../domain/comparison';
-import { DiscussionBundle, DiscussionComment, DiscussionMessage, DiscussionReview, commentLocation } from '../domain/discussion';
+import { DiscussionBundle, DiscussionComment, DiscussionMessage, DiscussionReview, commentKindLabel, commentLocation } from '../domain/discussion';
 
 const kinds = [
     { kind: 'general' as const, key: 'general_comments', path: 'general-comments' },
@@ -29,7 +29,7 @@ export class DiscussionSession {
             if (await backend.username(signal) !== comparison.username) { throw new Error('Account changed. Refresh the request.'); }
             const reviews = comparison.review.public ? await backend.list<DiscussionReview>(`/review-requests/${comparison.requestId}/reviews/`, 'reviews', {}, signal) : [];
             if (version !== this.generation || signal?.aborted) { throw new Error('Discussion changed.'); }
-            return this.current = { id: randomUUID(), comparison, reviews: reviews.filter(review => review.public).sort((a, b) => b.id - a.id) };
+            return this.current = { id: randomUUID(), comparison, reviews: reviews.filter(review => review.public).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp) || b.id - a.id) };
         })();
         this.indexTask = { comparisonId: comparison.id, promise };
         try { return await promise; } finally { if (this.indexTask?.promise === promise) { this.indexTask = undefined; } }
@@ -91,14 +91,14 @@ export class DiscussionSession {
         }));
         if (review.body_bottom) { messages.push({ key: `review:${review.id}:footer`, kind: 'footer', text: review.body_bottom, author, timestamp: review.timestamp }); }
         if (this.current?.id !== index.id) { throw new Error('Discussion changed.'); }
-        return { review, messages, replies: replies.sort((a, b) => a.id - b.id) };
+        return { review, messages, replies: replies.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.id - b.id) };
     }
     async transcript(comparison: RemoteComparison, signal?: AbortSignal): Promise<string> {
         const index = await this.index(comparison, signal), lines = [`# Comments · Review #${comparison.requestId}`, ''];
         for (const review of [...index.reviews].reverse()) {
             const bundle = await this.bundle(index, review, undefined, signal);
             lines.push(`## ${review.links.user?.title ?? 'Unknown'} · ${review.timestamp}${review.ship_it ? ' · Ship It' : ''}`, '');
-            const append = (message: DiscussionMessage) => { lines.push(`### ${message.kind}${message.path ? ' · ' + message.path : ''}${message.location ? ' · v' + message.location.revision : ''}${message.issue ? ' · ' + message.issue : ''}`, '', message.text, ''); };
+            const append = (message: DiscussionMessage) => { lines.push(`### ${commentKindLabel(message.kind)}${message.path ? ' · ' + message.path : ''}${message.location ? ' · v' + message.location.revision : ''}${message.issue ? ' · ' + message.issue : ''}`, '', message.text, ''); };
             bundle.messages.forEach(append);
             for (const reply of bundle.replies) {
                 lines.push(`### Reply · ${reply.links.user?.title ?? 'Unknown'} · ${reply.timestamp}`, '');

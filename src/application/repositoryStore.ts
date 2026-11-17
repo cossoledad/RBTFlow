@@ -7,10 +7,10 @@ export interface StateStorage {
     update(key: string, value: unknown): PromiseLike<void>;
 }
 export function initialForm(server = ''): FormData {
-    return { server, repositoryId: null, targetRef: '', baseRef: '', mode: 'squash', reviewId: null,
+    return { server, repositoryId: null, targetRef: '', baseRef: '', mode: 'bound', reviewId: null,
         summary: '', description: '', testing: '', people: [], groups: [], bugs: [], branch: '', changeDescription: '' };
 }
-const preferenceFields = ['server', 'repositoryId', 'targetRef', 'baseRef', 'mode', 'people', 'groups', 'bugs', 'branch'] as const;
+const preferenceFields = ['server', 'repositoryId', 'targetRef', 'baseRef', 'mode', 'people', 'groups', 'bugs'] as const;
 
 /** Canonical repository root scopes global state across VS Code workspaces/windows. */
 export class RepositoryStore {
@@ -22,6 +22,13 @@ export class RepositoryStore {
         if (!this.get('ownForm')) {
             const old = this.legacy?.get<FormData>(`form:${this.root}`);
             if (old) { await this.set('ownForm', old); await this.saveDefaults(old); }
+        }
+        if (!this.get('threeDiffModes')) {
+            for (const key of ['ownForm', 'defaults']) {
+                const value = this.get<Partial<FormData>>(key);
+                if (value && this.get('finalDiffDefaults') && value.mode === 'squash') { await this.set(key, { ...value, mode: 'bound' }); }
+            }
+            await this.set('threeDiffModes', true);
         }
         if (!this.get('submissionPending')) {
             const old = this.legacy?.get(`pending:${this.root}`);

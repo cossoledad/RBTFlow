@@ -7,7 +7,7 @@ import { RBToolsAdapter } from '../adapters/rbtools';
 import { ProcessError, runProcess } from '../adapters/process';
 import { ReviewSession } from '../application/reviewSession';
 import { ReviewPlan } from '../domain/model';
-import { FilePending, fields, git, input, labRoot, project, rbtPath, temporary } from './helpers';
+import { FilePending, fields, git, input, labRoot, project, rbtPath, temporary, uniqueFixtureHead } from './helpers';
 
 const specsPromise = readFile(path.join(project, 'build/fixtures.json'), 'utf8').then(text => JSON.parse(text) as {
     scenarios: Record<string, { base: string; head: string }>;
@@ -16,6 +16,7 @@ async function sessionFor(head: string, fault = false) {
     const dir = await temporary('integration-'), root = path.join(dir, 'worktree');
     await git(labRoot, 'worktree', 'add', '--detach', root, head);
     await copyFile(path.join(labRoot, '.reviewboardrc'), path.join(root, '.reviewboardrc'));
+    await uniqueFixtureHead(root);
     const store = new FilePending(path.join(dir, 'pending.json')); await store.initialize();
     class LostResponse extends RBToolsAdapter {
         override async post(...args: Parameters<RBToolsAdapter['post']>): Promise<number> {
@@ -47,16 +48,21 @@ test('real adapter posts all five Git shapes; published review is updated in pla
     const refs = await git(labRoot, 'show-ref'), branch = await git(labRoot, 'symbolic-ref', 'HEAD'), status = await git(labRoot, 'status', '--porcelain=v1', '-z');
     for (const [name, spec] of Object.entries(scenarios)) {
         const { session, cleanup } = await sessionFor(spec.head);
-        const plan = await session.preview({ ...input, baseRef: name === 'stacked-child' ? spec.base : '', mode: name === 'linear' ? 'history' : 'squash' });
+        const plan = await session.preview({ ...input, baseRef: name === 'stacked-child' ? spec.base : '' });
         assert.equal(plan.git.base, spec.base);
+        assert.equal(plan.input.mode, 'bound'); assert.equal(plan.bindingVersion, 1);
         const receipt = await session.post(plan.id, plan.input, { ...fields, summary: fields.summary + ': ' + name });
         assert.equal(receipt.published, false);
         assert.equal(session.pending, undefined);
         await verifyServerTree(plan, receipt.id, receipt.diffRevision);
+        const uploaded = await session.backend(plan.server).snapshot(receipt.id);
+        assert.equal(uploaded.draft?.commit_id, plan.git.head); assert.equal(uploaded.review.created_with_history, false);
+        assert.equal(uploaded.draft?.branch, plan.input.targetRef);
         if (name === 'merged') {
             const current = session.plan!;
             await session.publish(current.id, current.input, { ...fields, summary: fields.summary + ': ' + name });
             await git(session.root, 'switch', '--detach', scenarios['conflict-resolved']!.head);
+            await uniqueFixtureHead(session.root);
             const updated = await session.preview({ ...input, server: plan.server, reviewId: receipt.id });
             const next = await session.post(updated.id, updated.input, fields);
             assert.equal(next.id, receipt.id);
@@ -65,7 +71,7 @@ test('real adapter posts all five Git shapes; published review is updated in pla
             await session.publish(saved.id, saved.input, fields);
             await verifyServerTree(updated, next.id, 2, true);
             const clearing = await session.preview({ ...input, reviewId: next.id });
-            const empty = { ...fields, description: '', testing: '', people: [], groups: [], bugs: [], branch: '' };
+            const empty = { ...fields, description: '', testing: '', people: [], groups: [], bugs: [], branch: input.targetRef };
             const cleared = await session.post(clearing.id, clearing.input, empty);
             assert.equal(cleared.id, next.id);
         }
@@ -76,7 +82,7 @@ test('real adapter posts all five Git shapes; published review is updated in pla
     assert.deepEqual(await git(labRoot, 'status', '--porcelain=v1', '-z'), status);
 });
 
-test('Git drift, wrong history mode and concurrent server edits are rejected before post', { timeout: 60_000 }, async () => {
+test('Git drift and concurrent edits are rejected; mode changes cannot convert an existing final diff', { timeout: 60_000 }, async () => {
     const { scenarios } = await specsPromise;
     const { root, session, factory, cleanup } = await sessionFor(scenarios.merged!.head);
     let plan = await session.preview(input);
@@ -85,7 +91,8 @@ test('Git drift, wrong history mode and concurrent server edits are rejected bef
     assert.equal(session.pending, undefined);
     plan = await session.preview(input);
     const receipt = await session.post(plan.id, plan.input, fields);
-    await assert.rejects(session.preview({ ...input, reviewId: receipt.id, mode: 'history' }), /线性/);
+    await assert.rejects(session.preview({ ...input, reviewId: receipt.id, mode: 'history' }), /Create a new request/);
+    await assert.rejects(session.preview({ ...input, reviewId: receipt.id, mode: 'squash' }), /HEAD binding/);
     const loaded = await session.preview({ ...input, reviewId: receipt.id });
     const outsider = factory(loaded.server);
     await outsider.post({ ...loaded, id: loaded.id + '-external' }, { ...fields, summary: 'Changed in another client' });

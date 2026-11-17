@@ -8,3 +8,5 @@ rbtflow-sync-draft = rbtflow_bridge:SyncDraft
 rbtflow-verify-patch = rbtflow_bridge:VerifyPatch
 rbtflow-read-comparison = rbtflow_bridge:ReadComparison
 rbtflow-save-review = rbtflow_bridge:SaveReview
+rbtflow-watch = rbtflow_bridge:WatchUpdates
+rbtflow-find-commit = rbtflow_bridge:FindCommitRequests

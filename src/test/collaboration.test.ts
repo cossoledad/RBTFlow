@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { randomUUID } from 'node:crypto';
 import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { RBToolsAdapter } from '../adapters/rbtools';
@@ -87,6 +88,7 @@ test('real public discussion, every comment type and replies; historical diff id
     await store.mark(first.state.identity, [entry], true); assert(isUnread(store.get(first.state.identity), updated));
     // A separate author provides an actionable incoming request for the real native Host test.
     const otherPending = new FilePending(path.join(dir, 'other.json')); await otherPending.initialize();
+    await git(root, 'commit', '--allow-empty', '-m', `Independent inbox request ${randomUUID()}`);
     const other = new ReviewSession(root, new GitAdapter(), reviewer, otherPending), otherPlan = await other.preview(input);
     const incomingFields = { ...metadata, people: ['admin'], groups: [], summary: 'Incoming review for native inbox', description: 'Waiting for native inbox review' };
     const incoming = await other.post(otherPlan.id, otherPlan.input, incomingFields); await other.publish(other.plan!.id, other.plan!.input, incomingFields);

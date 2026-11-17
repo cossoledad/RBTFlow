@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.1
+
+- Check public commit owners and your private drafts before uploading a bound HEAD; avoid creating duplicate requests.
+- Classify API 227 as a commit conflict, including old recovery records, and stop offering an impossible binding retry.
+- Open the existing request or keep the failed draft and continue; archive recovery locally without server writes.
+
+## 0.6.0 (local build)
+
+- Allow publishing after a read-only browser visit by comparing meaningful request content instead of server caches.
+- Restore repository-scoped Final diff + HEAD, Squash diff and Commit history settings.
+- Refresh the selected request, native inline comments and open discussion transcript on polling or window focus.
+- Notify about public reviews/replies and feedback on authored pending requests; retain read state and deduplication.
+- Preserve open input and immutable code snapshots; require opening a new diff and resolve external draft conflicts before writing.
+
+## 0.5.0 (local build)
+
+- Unify new Git requests around the frozen final diff and a full, native HEAD commit ID; explicitly disable server diff regeneration.
+- Verify commit, target, repository, diff identity, patch and files before and after publication, independently of the current checkout.
+- Preserve partial-write journals and request IDs; explicitly complete an uploaded draft without repeating post.
+- Retain legacy History browsing/review/publication and compatible linear updates; migrate cached submission preferences.
+- Remove the changed-file count badge; retain Inbox unread notifications.
+- Click line comments to focus the correct original/changed pane and expand grouped public replies, author/time and issue state.
+- Preserve local feedback during same-version navigation; historical discussion is read-only.
+
 ## 0.4.0
 
 - Native Inbox for pending requests assigned directly or through review groups, with unread badges and dimmed read items.

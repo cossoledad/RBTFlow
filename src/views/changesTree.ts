@@ -30,7 +30,6 @@ export class ChangesTree implements vscode.TreeDataProvider<ChangeNode>, vscode.
             return item;
         };
         this.nodes = layout === 'tree' ? changeTree(files).map(node => convert(node)) : this.files;
-        this.view.badge = files.length ? { value: files.length, tooltip: 'Changed files' } : undefined;
         this.emitter.fire();
     }
     getFiles(): ChangeItem[] { return this.files; }

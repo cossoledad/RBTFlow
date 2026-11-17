@@ -1,7 +1,7 @@
 # 实现思路与方向
 
-状态：设计基线。现在已实现 0.4.0 的原生视图、范围分析、预览、提交、评论阅读和待审收件箱；当前代码与验证边界见
-[扩展开发与验收](extension.md)。下文保留最初的方向和后续设计，不能把所有目标都视为已实现。
+状态：设计基线。现在已实现 0.6.0 的原生视图、范围分析、预览、提交、评论阅读和待审收件箱；当前代码与验证边界见
+[扩展开发与验收](extension.md) 和 [最终 Diff/HEAD 绑定](final-diff.md)。下文保留最初的方向和后续设计，不能把所有目标都视为已实现。
 本次通过合成仓库确认了若干行为；尚未拿到公司真实仓库、服务版本、配置和错误日志，
 所以不能断定实际工作中的所有失败都是同一原因。
 
@@ -96,7 +96,8 @@ gitGraph
 ### 审核模式
 
 默认建议使用汇总 diff，适用于本次验证的 merge、侧分支合并、冲突解决以及父 diff。
-需要逐提交审核时，只有在服务端支持且提交链满足 RBTools 要求时才允许选择 with-history；
+默认最终汇总 diff 并单独绑定原生 HEAD commit_id；仓库设置另提供普通 Squash 和显式 Commit history，后者也用于旧 History 单兼容更新。
+兼容更新只有在服务端支持且提交链满足 RBTools 要求时才允许 with-history；
 还要检测根提交、merge 和空提交等该模式无法处理的情况。
 
 更新旧 history 审核单时，界面先读取旧单模式。如果当前范围非线性，应解释不兼容原因，
@@ -219,3 +220,5 @@ RBTools 7.0 支持 `RBTOOLS_CONFIG_PATH` 指向额外 `.reviewboardrc` 目录且
 - [Remote extension 与 SecretStorage](https://code.visualstudio.com/api/advanced-topics/remote-extensions)
 
 官方接口说明、当前安装源码、本次样例测量和未来设计在上文分别标注，不能互相替代验收。
+
+当前网页版替代能力与下一阶段安排见 [缺口与规划](web-parity.md)。

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { GitAdapter } from '../adapters/git';
-import { draftRestriction } from '../domain/comparison';
+import { draftRestriction, sourceRange } from '../domain/comparison';
 import { ReviewController } from './reviewController';
 import { SnapshotFiles } from './snapshots';
 import { ChangeItem, ChangesLayout, ChangesTree } from './changesTree';
@@ -57,6 +57,12 @@ export class ReviewSidebar implements vscode.Disposable {
                     this.controllers.set(root, fresh);
                     this.subscriptions.push(fresh.onDidChange(() => { if (this.current === fresh) { this.render(); } }));
                     this.subscriptions.push(fresh.onDidViewRequest(comparison => { void this.inbox.viewed(comparison).catch(error => this.log.warn('Could not mark request read', error)); }));
+                    this.subscriptions.push(fresh.onDidRefreshRemote(() => {
+                        if (this.current !== fresh) { return; }
+                        this.review.refresh();
+                        void this.comments.refresh().catch(error => this.log.warn('Comment refresh failed', error));
+                        void this.discussion.refreshOpen(fresh).catch(error => this.log.warn('Discussion refresh failed', error));
+                    }));
                     return fresh;
                 }).catch(error => { fresh.dispose(); throw error; }).finally(() => { this.initializing.delete(root); });
                 this.initializing.set(root, pending);
@@ -85,22 +91,48 @@ export class ReviewSidebar implements vscode.Disposable {
     private submitItems(): NativeItem[] {
         const c = this.current; if (!c) { return []; }
         const people = [...c.form.people, ...c.form.groups.map(value => '@' + value)].join(', ');
-        return [this.item('branch', 'Branch', c.branch, 'git-branch', 'submit'),
+        const rows = [this.item('branch', 'Branch', c.branch, 'git-branch', 'submit'),
             this.item('target', 'Target', c.form.targetRef || 'Choose branch', 'git-compare', 'submit', 'target'),
             this.item('reviewers', 'Reviewers', people || 'None', 'organization', 'submit', 'reviewers'),
             this.item('bugs', 'Bugs', c.form.bugs.join(', ') || 'None', 'issues', 'submit', 'bugs'),
             this.item('message', 'Message', c.form.summary || 'From commits', 'git-commit', 'submit', 'details')];
+        const comparison = c.comparison();
+        if (comparison?.kind === 'local') {
+            for (const [key, value] of [['BASE', comparison.plan.git.base], ['HEAD', comparison.plan.git.head]]) {
+                const row = this.item(key!, key!, value!.slice(0, 12), 'git-commit', 'submit');
+                row.tooltip = `${value}\nClick to copy`; row.command = { command: 'rbtflow.copyCommit', title: 'Copy commit SHA', arguments: [value] }; rows.push(row);
+            }
+        }
+        return rows;
     }
     private reviewItems(): NativeItem[] {
         const c = this.current; if (!c) { return []; }
         const rows: NativeItem[] = [], remote = c.browser.current;
         if (c.pending) { rows.push(this.item('recover', 'Check server', '', 'sync', 'review', 'recover')); }
+        const pending = c.session.pending;
+        const conflict = c.session.conflict ?? c.retainedConflict;
+        if (conflict) {
+            rows.push(this.item('commitConflict', 'HEAD already linked', pending?.id ? `Draft #${pending.id} kept` : '', 'warning', 'review'));
+            for (const request of conflict.requests) {
+                rows.push(this.item(`commitOwner:${request.id}`, `Open existing #${request.id}`, `${request.author} · ${request.status}`, 'go-to-file', 'review', `commitOwner:${request.id}`));
+            }
+            if (pending?.commitConflict) { rows.push(this.item('keepConflictDraft', 'Keep draft and continue', '', 'archive', 'review', 'keepConflictDraft')); }
+        }
+        if (pending?.kind === 'post' && pending.plan.bindingVersion && pending.bindingCheckpoint && pending.id && !pending.commitConflict) {
+            rows.push(this.item('completeDraft', 'Complete draft', `#${pending.id}`, 'check', 'review', 'completeDraft'));
+        }
         if (!remote) { return rows; }
+        if (c.remoteOutdated) { rows.push(this.item('latest', 'New diff available', 'Open latest', 'sync', 'review', 'latest')); }
         const details = remote.details, reviewers = [...details.target_people.map(value => value.title!), ...details.target_groups.map(value => '@' + value.title!)];
         rows.push(this.item('request', `#${remote.requestId} ${details.summary}`, remote.review.links.submitter?.title ?? '', 'git-pull-request', 'review', 'select'),
             this.item('version', 'Version', `${remote.selected.scope === 'draft' ? 'Draft' : 'Published'} v${remote.selected.revision}`, 'versions', 'review', 'version'),
             this.item('requestReviewers', 'Reviewers', reviewers.join(', ') || 'None', 'organization', 'review', c.canEditRequest ? 'reviewers' : undefined));
         if (details.bugs_closed.length) { rows.push(this.item('requestBugs', 'Bugs', details.bugs_closed.join(', '), 'issues', 'review', c.canEditRequest ? 'bugs' : undefined)); }
+        if (details.branch) { rows.push(this.item('requestBranch', 'Target', details.branch, 'git-branch', 'review')); }
+        if (details.commit_id) {
+            const commit = this.item('commitId', 'Commit', details.commit_id.slice(0, 12), 'git-commit', 'review');
+            commit.tooltip = details.commit_id; commit.command = { command: 'rbtflow.copyCommit', title: 'Copy commit SHA', arguments: [details.commit_id] }; rows.push(commit);
+        }
         if (remote.review.public) { rows.push(this.discussion.root(c, remote)); }
         if (c.canPublishRequest) { rows.push(this.item('publishRequest', 'Publish request', '', 'cloud-upload', 'review', 'publishRequest')); }
         if (c.canEditRequest && c.session.plan?.input.reviewId === remote.requestId) { rows.push(this.item('saveDiff', 'Save diff', 'Current branch preview', 'cloud-upload', 'review', 'updateDiff')); }
@@ -145,6 +177,7 @@ export class ReviewSidebar implements vscode.Disposable {
         else if (action.action === 'details') { await c.editDetails(action.section); }
         else if (action.action === 'select') { c.selectRemote(); }
         else if (action.action === 'version') { await c.chooseVersion(); }
+        else if (action.action === 'latest') { const remote = c.browser.current; if (remote) { await c.openRemote(remote.requestId, undefined, remote.server); } }
         else if (action.action === 'publishRequest') { await c.publishRequest(); }
         else if (action.action === 'updateDiff') { await c.updateDiff(); }
         else if (action.action === 'comment') { await c.editFeedback(); }
@@ -152,6 +185,9 @@ export class ReviewSidebar implements vscode.Disposable {
         else if (action.action === 'publishReview') { await c.saveFeedback(true); }
         else if (action.action === 'reloadFeedback') { await c.reloadFeedback(); }
         else if (action.action === 'recover') { await c.recover(); }
+        else if (action.action === 'completeDraft') { await c.completeDraft(); }
+        else if (/^commitOwner:[1-9]\d*$/.test(action.action)) { await c.continueFromConflict(Number(action.action.split(':')[1])); }
+        else if (action.action === 'keepConflictDraft') { await c.continueFromConflict(); }
         else if (action.action === 'browser') { await this.openUrl(); }
     }
     async createDraft(): Promise<void> { if (await this.current?.createDraft()) { await vscode.commands.executeCommand('rbtflow.review.focus'); } }
@@ -188,23 +224,35 @@ export class ReviewSidebar implements vscode.Disposable {
             await vscode.commands.executeCommand('rbtflow.review.focus');
         }
     }
-    async refreshDiscussion(): Promise<void> { this.current?.discussion.clear(); this.review.refresh(); }
+    async refreshDiscussion(): Promise<void> {
+        const current = this.current; if (!current) { return; }
+        current.discussion.clear(); this.review.refresh();
+        await Promise.all([this.comments.refresh(), this.discussion.refreshOpen(current)]);
+    }
     async openCommentDiff(value: DiscussionTarget | NativeItem): Promise<void> {
         const target = this.discussion.target(value), c = this.current, location = target?.message?.location;
         if (!target || !c || target.root !== c.root || c.browser.current?.id !== target.comparisonId || !location) { return; }
         const comparison = target.index.comparison;
-        if (!await c.openRemote(location.requestId, { scope: 'published', revision: location.revision }, comparison.server)) { return; }
+        if (comparison.selected.scope !== 'published' || comparison.selected.revision !== location.revision) {
+            if (!await c.openRemote(location.requestId, { scope: 'published', revision: location.revision }, comparison.server)) { return; }
+        }
         const item = this.changes.getFiles().find(item => c.browser.current?.files[item.index]?.id === location.fileId);
         if (!item) { throw new Error('File no longer exists in this diff.'); }
         await this.openChange(item);
         const current = c.browser.current!, map = await c.backend(current.server).lines(current, location.fileId);
-        const rows = map.rows.filter(row => row[0] >= location.firstLine && row[0] < location.firstLine + location.numLines);
+        if (this.current !== c || c.browser.current?.id !== current.id) { return; }
+        const selected = sourceRange(map, location.firstLine, location.numLines, location.side);
+        if (!selected) { throw new Error('The exact comment lines are unavailable in this diff.'); }
         const tab = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
         if (!(tab instanceof vscode.TabInputTextDiff)) { return; }
-        const side = rows.some(row => row[2] !== null) ? 2 : 1, numbers = rows.flatMap(row => row[side] === null ? [] : [row[side]!]);
-        if (!numbers.length) { return; }
-        const uri = side === 2 ? tab.modified : tab.original, editor = vscode.window.visibleTextEditors.find(editor => editor.document.uri.toString() === uri.toString());
-        if (editor) { const range = new vscode.Range(numbers[0]! - 1, 0, numbers.at(-1)! - 1, 0); editor.selection = new vscode.Selection(range.start, range.end); editor.revealRange(range, vscode.TextEditorRevealType.InCenter); }
+        const uri = selected.side === 'head' ? tab.modified : tab.original;
+        const range = new vscode.Range(selected.start - 1, 0, selected.end - 1, 0);
+        await vscode.commands.executeCommand(selected.side === 'head' ? 'workbench.action.compareEditor.focusPrimarySide' : 'workbench.action.compareEditor.focusSecondarySide');
+        const editor = vscode.window.visibleTextEditors.find(editor => editor.document.uri.toString() === uri.toString());
+        if (editor) { editor.selection = new vscode.Selection(range.start, range.end); editor.revealRange(range, vscode.TextEditorRevealType.InCenter); }
+        else { await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { selection: range, preview: true }); }
+        const commentId = Number(target.message?.key.match(/^diff:(\d+)$/)?.[1]);
+        if (Number.isSafeInteger(commentId)) { this.comments.reveal(commentId); }
     }
     dispose(): void { this.subscriptions.forEach(value => value.dispose()); for (const c of this.controllers.values()) { c.dispose(); } this.comments.dispose(); this.inbox.dispose(); this.inputs.dispose(); this.submit.dispose(); this.review.dispose(); }
 }

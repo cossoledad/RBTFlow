@@ -1,0 +1,55 @@
+import * as vscode from 'vscode';
+import { strict as assert } from 'node:assert';
+import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
+import * as path from 'node:path';
+import { RBTFlowAPI } from '../extension';
+import { requestFields } from '../application/requestSession';
+import { git, labRoot, project } from './helpers';
+
+/** Focused native acceptance for commit conflicts, using an isolated lab worktree. */
+export async function run(): Promise<void> {
+    const root = process.env.RBTFLOW_HOST_ROOT!; assert(root && root !== labRoot);
+    const extension = vscode.extensions.getExtension<RBTFlowAPI>('ganjinbo.rbtflow')!;
+    const api = await extension.activate(); let controller = (await api.open(root))!;
+    const checks: string[] = [];
+    controller.form.people = ['reviewer']; controller.form.groups = [];
+    assert(await controller.preview()); const plan = controller.session.plan!;
+    assert(await controller.createDraft()); const id = controller.browser.current!.requestId, backend = controller.backend(plan.server);
+    const owner = await backend.snapshot(id);
+    assert(await controller.preview()); assert.equal(controller.canCreate, false);
+    assert.equal(controller.session.conflict?.requests[0]?.id, id);
+    await api.sidebar.run(api.sidebar.review.getChildren().find(item => item.key === `commitOwner:${id}`)!.action!);
+    checks.push('private-draft-owner-preflight-and-native-open-existing');
+    const legacyPlan = { ...plan, id: randomUUID() }, fields = requestFields(owner);
+    const orphan = await backend.post(legacyPlan, fields), checkpoint = await backend.snapshot(orphan);
+    await controller.store.set('submissionPending', { kind: 'post', plan: legacyPlan, fields, id: orphan, bindingCheckpoint: checkpoint });
+    controller = await api.sidebar.reload(root);
+    assert.equal(controller.session.pending?.commitConflict?.requests[0]?.id, id);
+    assert(!api.sidebar.review.getChildren().some(item => item.key === 'completeDraft'));
+    await api.sidebar.run(api.sidebar.review.getChildren().find(item => item.key === `commitOwner:${id}`)!.action!);
+    assert.equal(controller.pending, false); assert.equal(controller.browser.current!.requestId, id);
+    checks.push('legacy-journal-classification-and-local-archive-release');
+    assert(await controller.openRemote(orphan));
+    assert.equal(controller.canEditRequest, false); assert.equal(controller.canPublishRequest, false);
+    assert(!api.sidebar.review.getChildren().some(item => item.key === 'publishRequest'));
+    assert(api.sidebar.review.getChildren().some(item => item.key === `commitOwner:${id}`));
+    await api.sidebar.run(api.sidebar.review.getChildren().find(item => item.key === `commitOwner:${id}`)!.action!);
+    assert.equal(controller.browser.current!.requestId, id); assert.equal(controller.canPublishRequest, true);
+    checks.push('retained-orphan-is-readonly-and-links-back-to-the-valid-owner');
+    const record = controller.store.get<{ record: unknown }[]>('submissionArchives')!.at(-1)!.record;
+    await controller.store.set('submissionPending', record); controller.emit();
+    await api.sidebar.run(api.sidebar.review.getChildren().find(item => item.key === 'keepConflictDraft')!.action!);
+    assert.equal(controller.pending, false); assert.equal(controller.browser.current, undefined);
+    checks.push('keep-draft-and-continue-has-a-working-native-exit');
+    await git(root, 'commit', '--allow-empty', '-m', `Normal new HEAD ${randomUUID()}`);
+    assert(await controller.preview()); assert.equal(controller.canCreate, true);
+    const nextHead = controller.session.plan!.git.head;
+    assert(await controller.createDraft()); assert.equal(controller.browser.current!.details.commit_id, nextHead);
+    checks.push('normal-new-head-can-create-a-new-bound-draft');
+    assert.equal((await backend.snapshot(orphan)).fingerprint, checkpoint.fingerprint);
+    assert.equal((await backend.snapshot(id)).fingerprint, owner.fingerprint);
+    checks.push('both-original-server-drafts-are-unchanged');
+    await writeFile(path.join(project, 'build/host/latest.json'), JSON.stringify({ status: 'PASS', vscode: vscode.version, checks }, null, 2) + '\n');
+    console.log(`PASS focused conflict host: ${checks.join(', ')}`);
+}

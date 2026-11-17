@@ -74,7 +74,7 @@ async function main() {
   await runTests({
     vscodeExecutablePath: executable,
     extensionDevelopmentPath: process.env.RBTFLOW_EXTENSION_PATH || root,
-    extensionTestsPath: path.join(root, 'build/extension/test/host.js'),
+    extensionTestsPath: process.env.RBTFLOW_HOST_TESTS_PATH || path.join(root, 'build/extension/test/host.js'),
     extensionTestsEnv: { RBTFLOW_HOST_ROOT: workspace },
     launchArgs: [...(process.env.RBTFLOW_CDP_PORT ? [`--remote-debugging-port=${process.env.RBTFLOW_CDP_PORT}`] : []), '--disable-extensions', '--disable-workspace-trust', '--no-sandbox', '--disable-gpu',
       '--skip-welcome', '--skip-release-notes', '--user-data-dir', user, '--extensions-dir', path.join(dir, 'extensions'), workspace],

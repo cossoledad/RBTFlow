@@ -3,12 +3,14 @@ import { strict as assert } from 'node:assert';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { RBTFlowAPI } from '../extension';
-import { labApi, labRoot, project, rbtPath } from './helpers';
+import { git, labApi, labPage, labRoot, project, rbtPath } from './helpers';
 import { ChangeNode } from '../views/changesTree';
 import { NativeItem } from '../views/nativeTree';
 import { isUnread } from '../domain/inbox';
 import { InboxTarget } from '../views/inboxView';
+import { requestFields } from '../application/requestSession';
 
 async function waitFor(check: () => boolean): Promise<void> {
     const deadline = Date.now() + 20_000;
@@ -21,6 +23,14 @@ async function capture(name: string): Promise<void> {
     await waitFor(() => existsSync(path.join(dir, `${name}.png`)));
 }
 function leafCount(nodes: ChangeNode[]): number { return nodes.reduce((count, node) => count + (node.kind === 'folder' ? leafCount(node.children) : 1), 0); }
+async function discussionMessages(api: RBTFlowAPI): Promise<NativeItem[]> {
+    const root = api.sidebar.review.getChildren().find(item => item.key === 'discussion')!; assert(root);
+    const result: NativeItem[] = [];
+    const walk = async (items: NativeItem[]): Promise<void> => {
+        for (const item of items) { if (item.children) { await walk(await api.sidebar.review.getChildren(item)); } else { result.push(item); } }
+    };
+    await walk(await api.sidebar.review.getChildren(root)); return result;
+}
 
 export async function run(): Promise<void> {
     const checks: string[] = [], root = process.env.RBTFLOW_HOST_ROOT || labRoot;
@@ -33,12 +43,28 @@ export async function run(): Promise<void> {
     assert(manifest.contributes.views.rbtflow.every(view => view.type !== 'webview'));
     let controller = await api.open(root); assert(controller);
     checks.push('four-native-tree-views-without-webviews');
+    for (const [steps, mode] of [[1, 'squash'], [2, 'history'], [0, 'bound']] as const) {
+        controller.form.mode = 'bound';
+        const selecting = controller.settings('mode');
+        await new Promise(resolve => setTimeout(resolve, 400));
+        for (let step = 0; step < steps; step++) { await vscode.commands.executeCommand('workbench.action.quickOpenSelectNext'); }
+        await vscode.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+        await selecting; assert.equal(controller.form.mode, mode); assert.equal(controller.store.newForm().mode, mode);
+    }
+    controller = await api.sidebar.reload(root); assert.equal(controller.form.mode, 'bound');
+    checks.push('three-native-diff-mode-choices-persist-as-repository-defaults');
     controller.form.people = []; controller.form.groups = []; controller.form.bugs = ['NATIVE-1'];
     await controller.store.saveOwn(controller.form);
     assert(await controller.preview(), String(controller.lastError));
     const plan = controller.session.plan!;
     assert(controller.form.summary.trim()); assert(controller.form.description.trim());
     const generated = { summary: controller.form.summary, description: controller.form.description };
+    assert.equal(api.changes.view.badge, undefined);
+    const headRow = api.sidebar.submit.getChildren().find(item => item.key === 'HEAD')!;
+    assert(String(headRow.tooltip).includes(plan.git.head)); assert.equal(headRow.command?.command, 'rbtflow.copyCommit');
+    await vscode.commands.executeCommand(headRow.command!.command, ...headRow.command!.arguments!);
+    assert.equal(await vscode.env.clipboard.readText(), plan.git.head);
+    checks.push('changed-file-count-badge-is-absent-and-preview-exposes-full-copyable-head');
     assert(api.sidebar.submit.getChildren().some(item => item.key === 'message' && item.description === generated.summary));
     checks.push('preview-defaults-title-and-description-from-rbt-commit-parser');
     assert.equal(api.changes.getFiles().length, plan.git.files.length);
@@ -60,11 +86,23 @@ export async function run(): Promise<void> {
     await vscode.commands.executeCommand('rbtflow.createDraft');
     const remote = controller.browser.current!; assert(remote, String(controller.lastError));
     assert.equal(remote.selected.scope, 'draft'); assert.equal(remote.details.summary, generated.summary); assert.equal(remote.details.description, generated.description);
+    assert.equal(remote.review.created_with_history, false); assert.equal(remote.details.commit_id, plan.git.head); assert.equal(remote.details.branch, plan.input.targetRef);
+    assert(api.sidebar.review.getChildren().some(item => item.key === 'commitId' && String(item.tooltip).includes(plan.git.head)));
+    const requestRows = api.sidebar.review.getChildren(); assert.equal(new Set(requestRows.map(row => row.id)).size, requestRows.length);
+    checks.push('native-created-draft-has-the-frozen-head-sha-and-selected-target');
     assert.equal(controller.form.reviewId, null); assert.equal(controller.form.summary, ''); assert.equal(controller.session.plan, undefined);
     assert.equal(controller.comparison()?.kind, 'remote');
     assert(api.sidebar.review.getChildren().some(item => item.key === 'publishRequest'));
     assert(api.sidebar.submit.getChildren().every(item => !['publishRequest', 'testing', 'changeDescription'].includes(item.key)));
     checks.push('created-draft-hands-off-to-review-and-clears-submission-identity');
+    const checkpoint = controller.browser.current!.requestSnapshot!;
+    await controller.store.set('submissionPending', { kind: 'post', plan, fields: requestFields(checkpoint), id: remote.requestId, bindingCheckpoint: checkpoint }); controller.emit();
+    const recoveryRows = api.sidebar.review.getChildren(); assert.equal(new Set(recoveryRows.map(row => row.id)).size, recoveryRows.length);
+    const completing = recoveryRows.filter(item => item.key === 'completeDraft'); assert.equal(completing.length, 1);
+    assert.equal(controller.canPublishRequest, false);
+    await api.sidebar.run(completing[0]!.action!); assert.equal(controller.pending, false, String(controller.lastError));
+    assert.equal(controller.browser.current?.requestId, remote.requestId);
+    checks.push('native-recovery-offers-one-complete-action-and-reuses-the-uploaded-draft');
     const id = remote.requestId;
     await controller.editDetails('review', 'description');
     const descriptionEditor = vscode.window.activeTextEditor!;
@@ -79,6 +117,28 @@ export async function run(): Promise<void> {
     await descriptionEditor.edit(edit => edit.insert(descriptionEditor.document.positionAt(descriptionEditor.document.getText().length), '\n\nSecond save'));
     await descriptionEditor.document.save();
     await waitFor(() => !controller!.busy && controller!.browser.current?.details.description === 'Native description\n\nSecond save');
+    const localText = descriptionEditor.document.getText() + '\nPreserved local edit';
+    await descriptionEditor.edit(edit => edit.insert(descriptionEditor.document.positionAt(descriptionEditor.document.getText().length), '\nPreserved local edit'));
+    const beforeRefresh = controller.browser.current!.id;
+    await labApi(`/review-requests/${id}/draft/`, 'PUT', new URLSearchParams({ bugs_closed: 'BROWSER-CHANGE' }));
+    await controller.pollRemote();
+    assert.equal(controller.browser.current!.id, beforeRefresh); assert.equal(descriptionEditor.document.getText(), localText); assert(descriptionEditor.document.isDirty);
+    assert.deepEqual(controller.browser.current!.details.bugs_closed, ['BROWSER-CHANGE']);
+    await descriptionEditor.document.save();
+    await waitFor(() => !controller!.busy && controller!.browser.current?.details.description === localText);
+    assert.deepEqual(controller.browser.current!.details.bugs_closed, ['BROWSER-CHANGE']);
+    checks.push('background-metadata-refresh-preserves-unsaved-native-input-and-unrelated-server-fields');
+    await descriptionEditor.edit(edit => edit.insert(descriptionEditor.document.positionAt(descriptionEditor.document.getText().length), '\nDo not overwrite browser'));
+    await labApi(`/review-requests/${id}/draft/`, 'PUT', new URLSearchParams({ description: 'Description edited in browser' }));
+    await controller.pollRemote(); await descriptionEditor.document.save();
+    await waitFor(() => !controller!.busy && String(controller!.lastError).includes('This field changed'));
+    assert.equal(controller.browser.current!.details.description, 'Description edited in browser');
+    assert(descriptionEditor.document.getText().includes('Do not overwrite browser'));
+    checks.push('same-field-browser-edit-blocks-stale-native-editor-save-with-local-text-preserved');
+    const beforePage = controller.browser.current!.requestSnapshot!;
+    assert.equal(await labPage(id), 200);
+    assert.equal((await controller.backend().snapshot(id)).fingerprint, beforePage.fingerprint);
+    checks.push('read-only-browser-page-visit-does-not-stale-the-native-request');
     checks.push('native-description-editor-can-save-repeatedly-to-the-same-server-draft');
     await controller.store.set('settings', { rbtPath, timeoutSeconds: 90 });
     controller.form.people = ['reviewer']; await controller.store.saveOwn(controller.form); controller.emit();
@@ -120,11 +180,26 @@ export async function run(): Promise<void> {
     assert.equal(api.sidebar.review.getChildren().find(item => item.key === 'shipIt')!.checkboxState, vscode.TreeItemCheckboxState.Checked);
     checks.push('multiline-review-input-uses-native-editor-and-ship-it-uses-native-checkbox');
     await api.sidebar.openChange(api.changes.getFiles().find(item => item.file.path === fixture.filePath)!);
+    const deletionTab = vscode.window.tabGroups.activeTabGroup.activeTab?.input; assert(deletionTab instanceof vscode.TabInputTextDiff);
+    const deletionText = `Deleted source lines for native request #${id}`;
+    const deletedThread = api.sidebar.comments.controller.createCommentThread(deletionTab.original, new vscode.Range(1, 0, 2, 0), []);
+    await vscode.commands.executeCommand('rbtflow.addComment', { thread: deletedThread, text: deletionText });
+    assert.equal(controller.feedback.comments.at(-1)?.side, 'base'); assert.equal(controller.feedback.comments.at(-1)?.firstLine, 2); assert.equal(controller.feedback.comments.at(-1)?.numLines, 2);
     assert(await controller.saveFeedback(), String(controller.lastError));
     await capture('review');
     assert(await controller.saveFeedback(true), String(controller.lastError));
     const feedbackReceipt = controller.feedbackSession.receipt!; assert(feedbackReceipt.published);
     checks.push('native-review-and-inline-comments-save-and-publish-on-real-server');
+    const deleted = (await discussionMessages(api)).find(item => item.label === deletionText)!; assert(deleted);
+    assert.equal(deleted.command?.command, 'rbtflow.openCommentDiff');
+    const comparisonBeforeJump = controller.browser.current!.id;
+    await controller.setFeedback('Unsaved feedback survives comment navigation', false);
+    await vscode.commands.executeCommand(deleted.command!.command, ...deleted.command!.arguments!);
+    assert.equal(controller.browser.current?.id, comparisonBeforeJump); assert.equal(controller.feedback.body, 'Unsaved feedback survives comment navigation');
+    await waitFor(() => vscode.window.activeTextEditor?.document.uri.toString() === deletionTab.original.toString());
+    assert.equal(vscode.window.activeTextEditor!.selection.start.line, 1); assert.equal(vscode.window.activeTextEditor!.selection.end.line, 2);
+    await capture('deletion'); await controller.setFeedback('', false);
+    checks.push('published-deletion-comment-focuses-original-lines-without-reloading-or-losing-feedback');
     await controller.newSubmission(); assert.deepEqual(controller.form.people, ['reviewer']); assert.equal(controller.form.reviewId, null);
     assert(await controller.preview());
     assert.equal(controller.browser.current, undefined); assert.equal(controller.canReview, false);
@@ -161,7 +236,15 @@ export async function run(): Promise<void> {
     const historicalTab = vscode.window.tabGroups.activeTabGroup.activeTab?.input; assert(historicalTab instanceof vscode.TabInputTextDiff);
     assert.equal((await vscode.workspace.openTextDocument(historicalTab.modified)).getText(), 'one\ntwo\nthree\n');
     await waitFor(() => vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === historicalTab.modified.toString() && editor.selection.start.line === 1));
+    assert.equal(controller.canReview, false); assert(!api.sidebar.review.getChildren().some(item => item.key === 'shipIt'));
     checks.push('published-line-comment-opens-its-exact-historical-diff-and-line');
+    const grouped = api.sidebar.comments.reveal(Number(inlineComment.key.split(':')[1])); assert(grouped);
+    assert(grouped.comments.some(comment => comment.body === collaboration.text.diff));
+    assert(grouped.comments.some(comment => comment.body === collaboration.text.diffReply));
+    assert.equal(grouped.canReply, false); assert.equal(grouped.state, vscode.CommentThreadState.Unresolved);
+    checks.push('native-thread-groups-published-replies-with-author-time-and-issue-state');
+    await controller.pollRemote(); assert.equal(controller.remoteOutdated, false, 'A deliberately selected historical diff stays readable');
+    checks.push('background-refresh-keeps-an-explicit-historical-version-pinned');
     const inbox = api.sidebar.inbox, notifications: InboxTarget[][] = [];
     const listener = inbox.onDidNotify(batch => notifications.push(batch));
     await controller.store.set('settings', { rbtPath, timeoutSeconds: 90, notificationsEnabled: true, pollIntervalSeconds: 3600 });
@@ -191,8 +274,103 @@ export async function run(): Promise<void> {
     assert(isUnread(inbox.state!, updated.target.entry));
     await vscode.commands.executeCommand('rbtflow.markAllInboxRead'); assert.equal(inbox.unreadCount, 0);
     assert(!isUnread(inbox.store.get(updated.target.identity), updated.target.entry));
-    listener.dispose();
     checks.push('inbox-open-marks-read-and-preserves-native-ship-it-and-persistent-read-controls');
+    await api.sidebar.openChange(api.changes.getFiles()[0]!);
+    const liveTab = vscode.window.tabGroups.activeTabGroup.activeTab?.input; assert(liveTab instanceof vscode.TabInputTextDiff);
+    const liveFile = controller.browser.current!.files[0]!, commentText = `Automatic comment refresh ${Date.now()}`;
+    await vscode.commands.executeCommand('rbtflow.showDiscussion'); const liveTranscript = vscode.window.activeTextEditor!.document;
+    await controller.setFeedback('Local feedback survives automatic refresh', false);
+    const nativeEditorId = controller.browser.current!.id, notificationCount = notifications.length;
+    const created = await labApi<{ review: { id: number } }>(`/review-requests/${collaboration.inboxRequestId}/reviews/`, 'POST', new URLSearchParams({ body_top: commentText }), 'reviewer');
+    const comment = await labApi<{ diff_comment: { id: number } }>(`/review-requests/${collaboration.inboxRequestId}/reviews/${created.review.id}/diff-comments/`, 'POST',
+        new URLSearchParams({ filediff_id: String(liveFile.id), first_line: '1', num_lines: '1', text: commentText }), 'reviewer');
+    await labApi(`/review-requests/${collaboration.inboxRequestId}/reviews/${created.review.id}/`, 'PUT', new URLSearchParams({ public: 'true' }), 'reviewer');
+    await inbox.refresh(true);
+    assert.equal(notifications.length, notificationCount + 1);
+    await waitFor(() => liveTranscript.getText().includes(commentText));
+    await waitFor(() => !!api.sidebar.comments.reveal(comment.diff_comment.id));
+    assert.equal(controller.feedback.body, 'Local feedback survives automatic refresh'); assert.equal(controller.browser.current!.id, nativeEditorId);
+    assert.equal(vscode.window.activeTextEditor!.document.uri.toString(), liveTranscript.uri.toString());
+    checks.push('remote-review-refreshes-notification-native-gutter-and-open-readonly-transcript-without-losing-local-feedback');
+    const replyText = `Automatic reply refresh ${Date.now()}`;
+    const reply = await labApi<{ reply: { id: number } }>(`/review-requests/${collaboration.inboxRequestId}/reviews/${created.review.id}/replies/`, 'POST', new URLSearchParams({ body_top: replyText }), 'reviewer');
+    await labApi(`/review-requests/${collaboration.inboxRequestId}/reviews/${created.review.id}/replies/${reply.reply.id}/`, 'PUT', new URLSearchParams({ public: 'true' }), 'reviewer');
+    await inbox.refresh(true); await waitFor(() => liveTranscript.getText().includes(replyText));
+    assert.equal(notifications.length, notificationCount + 2);
+    checks.push('remote-reply-refreshes-the-live-discussion-and-notifies-once');
+    const privateReview = await labApi<{ review: { id: number } }>(`/review-requests/${collaboration.inboxRequestId}/reviews/`, 'POST', new URLSearchParams({ body_top: 'Server-side private review draft' }));
+    await controller.pollRemote(); assert.equal(controller.feedbackConflict, true);
+    assert.equal(controller.feedback.body, 'Local feedback survives automatic refresh'); assert.equal(await controller.saveFeedback(), false);
+    controller = await api.sidebar.reload(root);
+    assert.equal(controller.feedbackConflict, true); assert.equal(controller.feedback.body, 'Local feedback survives automatic refresh');
+    checks.push('external-private-review-draft-detects-conflict-and-retains-local-feedback');
+    await labApi(`/review-requests/${collaboration.inboxRequestId}/reviews/${privateReview.review.id}/`, 'DELETE');
+    assert(await controller.openRemote(id));
+    const oldVersion = controller.browser.current!, oldVersionId = oldVersion.id, oldDiffId = oldVersion.selected.id;
+    await api.sidebar.openChange(api.changes.getFiles()[0]!);
+    const oldCode = vscode.window.tabGroups.activeTabGroup.activeTab?.input; assert(oldCode instanceof vscode.TabInputTextDiff);
+    const frozenCode = (await vscode.workspace.openTextDocument(oldCode.modified)).getText();
+    const upload = new FormData(), patch = await controller.backend(oldVersion.server).comparisonData(oldVersion, 0, 'patch');
+    upload.append('path', new Blob([new Uint8Array(patch)]), 'review.diff');
+    await labApi(`/review-requests/${id}/diffs/`, 'POST', upload);
+    await controller.pollRemote(); assert.equal(controller.remoteOutdated, true); assert.equal(controller.canReview, false); assert.equal(controller.canPublishRequest, false);
+    assert.equal(controller.browser.current!.id, oldVersionId); assert.equal(controller.browser.current!.selected.id, oldDiffId);
+    assert.equal((await vscode.workspace.openTextDocument(oldCode.modified)).getText(), frozenCode);
+    const latestRow = api.sidebar.review.getChildren().find(item => item.key === 'latest')!; assert(latestRow);
+    await controller.pollRemote(); assert.equal(controller.remoteOutdated, true);
+    await api.sidebar.run(latestRow.action!); assert.equal(controller.remoteOutdated, false); assert.notEqual(controller.browser.current!.selected.id, oldDiffId);
+    checks.push('new-server-diff-requires-explicit-open-latest-and-preserves-old-readonly-code');
+    const backend = controller.backend(plan.server);
+    const beforeConflict = await backend.list<{ id: number }>('/review-requests/', 'review_requests', { 'from-user': 'admin', repository: '1', status: 'all' });
+    assert(await controller.preview()); assert.equal(controller.canCreate, false);
+    assert.equal(controller.session.conflict?.requests[0]?.id, id);
+    assert.equal(await controller.createDraft(), false);
+    assert.deepEqual((await backend.list<{ id: number }>('/review-requests/', 'review_requests', { 'from-user': 'admin', repository: '1', status: 'all' })).map(request => request.id), beforeConflict.map(request => request.id));
+    const ownerRow = api.sidebar.review.getChildren().find(item => item.key === `commitOwner:${id}`)!; assert(ownerRow);
+    await api.sidebar.run(ownerRow.action!); assert.equal(controller.browser.current!.requestId, id);
+    checks.push('same-head-preview-offers-existing-request-and-create-cannot-upload-a-duplicate');
+    // Persist an old-version partial draft with no conflict classification.
+    const legacyPlan = { ...plan, id: randomUUID() }, originalSnapshot = await backend.snapshot(id);
+    const retainedId = await backend.post(legacyPlan, requestFields(originalSnapshot));
+    const retainedSnapshot = await backend.snapshot(retainedId);
+    await controller.store.set('submissionPending', { kind: 'post', plan: legacyPlan, fields: requestFields(originalSnapshot), id: retainedId, bindingCheckpoint: retainedSnapshot });
+    controller = await api.sidebar.reload(root);
+    assert.equal(controller.session.pending?.commitConflict?.requests[0]?.id, id);
+    assert(!api.sidebar.review.getChildren().some(item => item.key === 'completeDraft'));
+    assert(api.sidebar.review.getChildren().some(item => item.key === 'keepConflictDraft'));
+    const openOwner = api.sidebar.review.getChildren().find(item => item.key === `commitOwner:${id}`)!;
+    await api.sidebar.run(openOwner.action!);
+    assert.equal(controller.pending, false); assert.equal(controller.browser.current!.requestId, id);
+    const archives = controller.store.get<{ record: { id: number } }[]>('submissionArchives')!;
+    assert.equal(archives.at(-1)?.record.id, retainedId);
+    assert.equal((await backend.snapshot(retainedId)).review.public, false);
+    assert.equal((await backend.snapshot(retainedId)).fingerprint, retainedSnapshot.fingerprint);
+    assert.equal((await backend.snapshot(id)).fingerprint, originalSnapshot.fingerprint);
+    checks.push('legacy-conflict-recovery-hides-impossible-retry-opens-owner-and-archives-locally-with-both-server-drafts-intact');
+    await controller.store.set('submissionPending', { kind: 'post', plan: legacyPlan, fields: requestFields(originalSnapshot), id: retainedId,
+        bindingCheckpoint: retainedSnapshot, commitConflict: { server: plan.server, username: 'admin', repositoryId: plan.repository.id, head: plan.git.head,
+            requests: [{ id, author: 'admin', public: true, status: 'pending' }] } });
+    controller.emit();
+    await api.sidebar.run(api.sidebar.review.getChildren().find(item => item.key === 'keepConflictDraft')!.action!);
+    assert.equal(controller.pending, false); assert.equal(controller.browser.current, undefined);
+    assert.notEqual(root, labRoot, 'Only the isolated host fixture may create a new development commit');
+    await git(root, 'commit', '--allow-empty', '-m', `Normal development after conflict ${randomUUID()}`);
+    assert(await controller.preview()); assert.equal(controller.canCreate, true);
+    const nextHead = controller.session.plan!.git.head; assert.notEqual(nextHead, plan.git.head);
+    assert(await controller.createDraft(), String(controller.lastError));
+    assert.equal(controller.browser.current!.details.commit_id, nextHead);
+    assert.equal((await backend.snapshot(retainedId)).fingerprint, retainedSnapshot.fingerprint);
+    checks.push('keep-conflicted-draft-releases-the-workflow-and-a-normal-new-head-can-create-its-own-bound-draft');
+    await controller.store.set('submissionPending', { kind: 'post', plan: legacyPlan, fields: requestFields(originalSnapshot), id: retainedId,
+        bindingCheckpoint: retainedSnapshot, commitConflict: { server: plan.server, username: 'admin', repositoryId: plan.repository.id, head: plan.git.head,
+            requests: [{ id, author: 'admin', public: true, status: 'pending' }] } });
+    controller.emit();
+    const keep = api.sidebar.review.getChildren().find(item => item.key === 'keepConflictDraft')!;
+    await api.sidebar.run(keep.action!);
+    assert.equal(controller.pending, false); assert.equal(controller.browser.current, undefined);
+    assert.equal((await backend.snapshot(retainedId)).fingerprint, retainedSnapshot.fingerprint);
+    checks.push('keep-draft-and-continue-releases-local-block-without-changing-server-or-git');
+    listener.dispose();
     await mkdir(path.join(project, 'build/host'), { recursive: true });
     await writeFile(path.join(project, 'build/host/latest.json'), JSON.stringify({ status: 'PASS', vscode: vscode.version, checks, published, feedbackReceipt }, null, 2) + '\n');
     console.log(`PASS RBTFlow Extension Host: ${checks.join(', ')}`);

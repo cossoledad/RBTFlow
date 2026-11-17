@@ -48,7 +48,7 @@ export class InboxView implements vscode.TreeDataProvider<InboxItem>, vscode.Fil
         this.view = vscode.window.createTreeView('rbtflow.inbox', { treeDataProvider: this });
         this.subscriptions.push(vscode.window.registerFileDecorationProvider(this), vscode.workspace.onDidChangeConfiguration(event => {
             if (event.affectsConfiguration('rbtflow.notifications')) { this.follow(this.active(), true); }
-        }));
+        }), vscode.window.onDidChangeWindowState(state => { if (state.focused && this.enabled) { void this.refresh(true); } }));
     }
     get unreadCount(): number { return this.state?.entries.filter(entry => isUnread(this.state!, entry)).length ?? 0; }
     follow(source?: ReviewController, force = false): void {
@@ -73,13 +73,16 @@ export class InboxView implements vscode.TreeDataProvider<InboxItem>, vscode.Fil
         clearTimeout(this.timer); this.busy = true; this.paint();
         const job = (async () => {
             try {
-                const result = await session.refresh(source.form.server, operation.signal);
+                const [inbox, selected] = await Promise.allSettled([session.refresh(source.form.server, operation.signal), source.pollRemote(operation.signal)]);
+                if (selected.status === 'rejected' && !operation.signal.aborted) { this.log.warn('Selected request refresh failed', selected.reason); }
+                if (inbox.status === 'rejected') { throw inbox.reason; }
+                const result = inbox.value;
                 if (version !== this.generation || operation.signal.aborted) { return; }
                 const sameAccount = this.state && inboxKey(this.state.identity) === inboxKey(result.state.identity);
                 this.state = result.state;
                 const alert = notify && this.enabled && !this.first && sameAccount; this.first = false;
-                if (alert && result.arrivals.length) {
-                    const targets = result.arrivals.map(entry => ({ root: source.root, identity: result.state.identity, entry }));
+                if (alert && result.notices.length) {
+                    const targets = result.notices.map(entry => ({ root: source.root, identity: result.state.identity, entry }));
                     this.notify(targets);
                 }
                 this.view.message = this.enabled ? undefined : 'Auto refresh off';
@@ -132,7 +135,7 @@ export class InboxView implements vscode.TreeDataProvider<InboxItem>, vscode.Fil
     }
     async viewed(comparison: RemoteComparison, opened?: InboxTarget): Promise<void> {
         if (!comparison.review.public || comparison.selected.scope !== 'published' || comparison.selected.revision !== requestRevision(comparison.review)) { return; }
-        const identity = { server: comparison.server, username: comparison.username }, entry = inboxEntry(comparison.review, false);
+        const identity = { server: comparison.server, username: comparison.username }, entry = inboxEntry(comparison.review, false, comparison.activity);
         const observations = [entry];
         if (opened && inboxKey(opened.identity) === inboxKey(identity) && opened.entry.id === entry.id) { observations.push(opened.entry); }
         const state = await this.store.mark(identity, observations, true);

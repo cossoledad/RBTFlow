@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { GitAdapter } from '../adapters/git';
 import { ApiError, Connection, RBToolsAdapter } from '../adapters/rbtools';
-import { inputKey, patchDigest, PendingWrite, Receipt, ReviewFields, ReviewInput, ReviewPlan, validateFields, validatePublication } from '../domain/model';
+import { CommitConflict, inputKey, patchDigest, PendingWrite, Receipt, ReviewFields, ReviewInput, ReviewPlan, validateFields, validatePublication } from '../domain/model';
+import { CommitConflictError, ReviewSafetyError } from '../domain/submission';
+import { sameSnapshot } from '../domain/snapshot';
 
 export interface PendingStore {
     load(): PendingWrite | undefined;
     save(value: PendingWrite | undefined): Promise<void>;
+    loadConflict?(): CommitConflict | undefined;
+    saveConflict?(value: CommitConflict | undefined): Promise<void>;
 }
 export type BackendFactory = (server: string) => RBToolsAdapter;
 
@@ -20,8 +24,61 @@ export class ReviewSession {
     receipt?: Receipt;
     private generation = 0;
     private writing = false;
+    private lastConflict?: CommitConflict;
     constructor(readonly root: string, readonly git: GitAdapter, readonly backend: BackendFactory, readonly pendingStore: PendingStore) {}
     get pending(): PendingWrite | undefined { return this.pendingStore.load(); }
+    get conflict(): CommitConflict | undefined {
+        const pending = this.pending;
+        if (pending) { return pending.commitConflict; }
+        return this.plan?.bindingVersion && this.sameCommit(this.lastConflict, this.plan) ? this.lastConflict : undefined;
+    }
+    private sameCommit(conflict: CommitConflict | undefined, plan: ReviewPlan): boolean {
+        return !!conflict && conflict.head === plan.git.head && conflict.repositoryId === plan.repository.id
+            && conflict.server === plan.server && conflict.username === plan.username;
+    }
+    private async lookupConflict(plan: ReviewPlan, excludeId?: number, signal?: AbortSignal): Promise<CommitConflict | undefined> {
+        if (!plan.bindingVersion) { return; }
+        const requests = await this.backend(plan.server).commitRequests(plan, excludeId ?? plan.input.reviewId ?? 0, signal);
+        const previous = this.pending?.commitConflict ?? this.pendingStore.loadConflict?.() ?? this.lastConflict;
+        // An empty public query cannot disprove a known 227 with an invisible owner.
+        const selfOwnsHead = plan.previous && (plan.previous.draft?.commit_id === plan.git.head || plan.previous.review.commit_id === plan.git.head);
+        const conflict = requests.length ? { head: plan.git.head, repositoryId: plan.repository.id, server: plan.server, username: plan.username, requests }
+            : !selfOwnsHead && this.sameCommit(previous, plan) && !previous!.requests.length ? previous : undefined;
+        this.lastConflict = conflict;
+        if (conflict || this.sameCommit(previous, plan)) { await this.pendingStore.saveConflict?.(conflict); }
+        return conflict;
+    }
+    /** Read-only migration/classification for drafts uploaded before conflict recovery existed. */
+    async inspectConflict(signal?: AbortSignal): Promise<CommitConflict | undefined> {
+        const pending = this.pending;
+        if (pending?.kind !== 'post' || !pending.plan.bindingVersion || !pending.id) { return; }
+        const backend = this.backend(pending.plan.server);
+        if (await backend.username(signal) !== pending.plan.username) { throw new ReviewSafetyError('Sign in as the original author.'); }
+        const snapshot = await backend.snapshot(pending.id, signal);
+        const bound = (snapshot.draft ?? snapshot.review).commit_id === pending.plan.git.head;
+        const conflict = bound ? undefined : await this.lookupConflict(pending.plan, pending.id, signal);
+        if (bound && this.sameCommit(this.pendingStore.loadConflict?.() ?? this.lastConflict, pending.plan)) {
+            this.lastConflict = undefined; await this.pendingStore.saveConflict?.(undefined);
+        }
+        if (conflict || pending.commitConflict) {
+            pending.commitConflict = conflict; await this.pendingStore.save(pending);
+        }
+        return conflict;
+    }
+    private async syncBinding(pending: PendingWrite, signal?: AbortSignal): Promise<void> {
+        try { await this.backend(pending.plan.server).replaceFields(pending.plan, pending.fields, pending.id!, signal, pending.bindingCheckpoint); }
+        catch (error) {
+            if (!(error instanceof ApiError && error.code === 227 && pending.plan.bindingVersion)) { throw error; }
+            this.backend(pending.plan.server).options.log?.(`Commit binding rejected (API 227) for draft #${pending.id}: ${error.message}`);
+            let requests: CommitConflict['requests'] = [];
+            try { requests = await this.backend(pending.plan.server).commitRequests(pending.plan, pending.id!, signal); }
+            catch (lookupError) { this.backend(pending.plan.server).options.log?.(`Commit conflict lookup failed: ${String(lookupError)}`); }
+            pending.commitConflict = { server: pending.plan.server, username: pending.plan.username, repositoryId: pending.plan.repository.id, head: pending.plan.git.head, requests };
+            this.lastConflict = pending.commitConflict;
+            await this.pendingStore.save(pending); await this.pendingStore.saveConflict?.(pending.commitConflict);
+            throw new CommitConflictError(pending.commitConflict, pending.id);
+        }
+    }
     invalidate(): void { this.generation++; this.plan = undefined; this.patch = undefined; }
     private assertIdle(): void { if (this.writing) { throw new Error('审核操作正在进行，请等待或取消。'); } }
     async connect(server: string, signal?: AbortSignal): Promise<Connection> { return this.backend(server).connect(signal); }
@@ -29,7 +86,8 @@ export class ReviewSession {
         this.assertIdle();
         this.invalidate();
         const generation = this.generation;
-        const git = await this.git.analyze(this.root, input, signal);
+        // Inspect the DAG before deciding whether the explicitly selected transport is compatible.
+        const git = await this.git.analyze(this.root, { ...input, mode: 'squash' }, signal);
         const backend = this.backend(input.server);
         const connection = await backend.connect(signal);
         let repository = connection.repositories.find(repo => repo.id === input.repositoryId);
@@ -42,15 +100,17 @@ export class ReviewSession {
             if (matches.length === 1) { repository = matches[0]; }
         }
         if (!repository) { throw new Error('请先连接服务器并明确选择对应的服务器 Git 仓库。'); }
-        if (input.mode === 'history' && !connection.supportsHistory) { throw new Error('该服务器不支持逐提交审核。'); }
         const previous = input.reviewId ? await backend.snapshot(input.reviewId, signal) : null;
+        const mode = previous?.review.created_with_history ? 'history' : input.mode;
+        if (previous && !previous.review.created_with_history && mode === 'history') { throw new ReviewSafetyError('This request uses final diffs. Create a new request for commit history.'); }
+        if (previous && mode === 'squash' && await backend.requestMode(previous, signal) === 'bound') { throw new ReviewSafetyError('This request has a HEAD binding. Use Final diff + HEAD to update it.'); }
+        if (mode === 'history' && (!connection.supportsHistory || !git.linear || git.emptyCommits)) {
+            throw new ReviewSafetyError('This history request needs a linear branch. Create a new request for the final diff.');
+        }
         if (previous) {
             backend.assertRepository(previous.review, repository.id);
             if (previous.review.status !== 'pending') { throw new Error('只能更新仍处于 pending 状态的审核单。'); }
             if (previous.review.links.submitter?.title !== connection.username) { throw new Error('当前只允许更新自己提交的审核单。'); }
-            if (previous.review.created_with_history !== (input.mode === 'history')) {
-                throw new Error(`原审核单为${previous.review.created_with_history ? '逐提交历史' : '汇总 diff'}模式，不能直接转换；请选择相同模式或新建审核单。`);
-            }
         }
         const patch = await backend.diff(git, input, repository, signal);
         if (!patch.length) { throw new Error('RBTools 返回了空 diff。'); }
@@ -58,9 +118,11 @@ export class ReviewSession {
         if (signal?.aborted || generation !== this.generation) { throw new Error('预览已过期，请重新分析。'); }
         if (git.fingerprint !== await this.git.fingerprint(this.root, input, signal)) { throw new Error('Git 状态已变化，请重新预览。'); }
         const plan: ReviewPlan = { id: randomUUID(), input: { server: connection.server, repositoryId: repository.id,
-            targetRef: input.targetRef, baseRef: input.baseRef, mode: input.mode, reviewId: input.reviewId }, git,
+            targetRef: input.targetRef, baseRef: input.baseRef, mode, reviewId: input.reviewId }, git,
             server: connection.server, repository, rbtVersion: connection.rbtVersion, serverVersion: connection.version,
-            username: connection.username, patchHash: patchDigest(patch), previous };
+            username: connection.username, patchHash: patchDigest(patch), previous, bindingVersion: mode === 'bound' ? 1 : undefined };
+        await this.lookupConflict(plan, undefined, signal);
+        if (signal?.aborted || generation !== this.generation) { throw new Error('Preview changed. Preview again.'); }
         this.plan = plan; this.patch = patch; this.receipt = undefined;
         return plan;
     }
@@ -79,10 +141,13 @@ export class ReviewSession {
         try {
             validateFields(fields);
             const plan = await this.current(planId, input, signal);
+            if (plan.bindingVersion) { fields = { ...fields, branch: plan.input.targetRef }; }
             const backend = this.backend(plan.server);
             if (await backend.username(signal) !== plan.username) { throw new Error('登录用户已变化，请重新连接并预览。'); }
+            const conflict = await this.lookupConflict(plan, undefined, signal);
+            if (conflict) { throw new CommitConflictError(conflict); }
             await backend.validatePeople(fields, signal);
-            if (plan.previous && (await backend.snapshot(plan.previous.review.id, signal)).fingerprint !== plan.previous.fingerprint) {
+            if (plan.previous && !sameSnapshot(await backend.snapshot(plan.previous.review.id, signal), plan.previous)) {
                 throw new Error('审核单已被修改，请重新载入并预览，避免覆盖网页中的编辑。');
             }
             const patch = await backend.diff(plan.git, plan.input, plan.repository, signal);
@@ -93,9 +158,12 @@ export class ReviewSession {
             const id = await backend.post(plan, fields, signal);
             pending.id = id;
             await this.pendingStore.save(pending);
-            await backend.replaceFields(plan, fields, id, signal);
+            pending.bindingCheckpoint = await backend.snapshot(id, signal);
+            await this.pendingStore.save(pending);
+            await this.syncBinding(pending, signal);
             const receipt = await backend.verify(plan, fields, id, false, signal);
             const previous = await backend.snapshot(id, signal);
+            if (previous.fingerprint !== receipt.fingerprint) { throw new ReviewSafetyError('The draft changed during verification. Check the server.'); }
             await this.pendingStore.save(undefined);
             this.receipt = receipt;
             // A saved draft is an existing review, even if the user originally chose new.
@@ -110,6 +178,7 @@ export class ReviewSession {
         try {
             validatePublication(fields);
             const plan = await this.current(planId, input, signal), receipt = this.receipt, backend = this.backend(plan.server);
+            if (plan.bindingVersion) { fields = { ...fields, branch: plan.input.targetRef }; }
             if (await backend.username(signal) !== plan.username) { throw new Error('登录用户已变化，请重新连接并预览。'); }
             if (input.reviewId !== receipt.id) { throw new Error('当前选择的审核单已变化，请重新预览。'); }
             const saved = await backend.verify(plan, fields, receipt.id, false, signal);
@@ -152,15 +221,44 @@ export class ReviewSession {
                 id = matches[0]?.id;
             }
             if (!id) { throw new Error('暂未找到完整提交。请检查服务器上的新草稿；确认后可清除待确认状态，不会自动重发。'); }
+            if (pending.id !== id) { pending.id = id; await this.pendingStore.save(pending); }
             const snapshot = await backend.snapshot(id, signal);
+            const conflict = await this.inspectConflict(signal);
+            if (conflict) { throw new CommitConflictError(conflict, id); }
             // A rejected publication leaves the verified draft intact. It is a
             // known draft, not an indefinitely uncertain write.
             const published = pending.kind === 'publish' && !snapshot.draft && snapshot.review.public;
-            const receipt = await backend.verify(pending.plan, pending.fields, id, published, signal);
+            let receipt: Receipt;
+            try { receipt = await backend.verify(pending.plan, pending.fields, id, published, signal); }
+            catch (error) {
+                if (pending.kind === 'post' && pending.plan.bindingVersion && !pending.bindingCheckpoint && snapshot.draft?.extra_data.rbtflow_plan_id === pending.plan.id) {
+                    await backend.verifyUploaded(pending.plan, id, false, signal);
+                    pending.bindingCheckpoint = snapshot; await this.pendingStore.save(pending);
+                }
+                throw error;
+            }
             await this.pendingStore.save(undefined);
             this.receipt = receipt;
             this.invalidate();
             return receipt;
+        } finally { this.writing = false; }
+    }
+    /** Explicit recovery only: finish the same uploaded artifact, never post a second diff/request. */
+    async completeBinding(signal?: AbortSignal): Promise<Receipt> {
+        this.assertIdle(); const pending = this.pending;
+        if (pending?.kind !== 'post' || !pending.plan.bindingVersion || !pending.id || !pending.bindingCheckpoint) { throw new ReviewSafetyError('Check the server before completing this draft.'); }
+        this.writing = true;
+        try {
+            const backend = this.backend(pending.plan.server);
+            if (await backend.username(signal) !== pending.plan.username) { throw new ReviewSafetyError('Sign in as the original author.'); }
+            const conflict = await this.inspectConflict(signal);
+            if (conflict) { throw new CommitConflictError(conflict, pending.id); }
+            const snapshot = await backend.snapshot(pending.id, signal);
+            if (!sameSnapshot(snapshot, pending.bindingCheckpoint)) { throw new ReviewSafetyError('The draft changed since upload. Check the server before continuing.'); }
+            await backend.verifyUploaded(pending.plan, pending.id, false, signal);
+            await this.syncBinding(pending, signal);
+            const receipt = await backend.verify(pending.plan, pending.fields, pending.id, false, signal);
+            await this.pendingStore.save(undefined); this.receipt = receipt; this.invalidate(); return receipt;
         } finally { this.writing = false; }
     }
 }

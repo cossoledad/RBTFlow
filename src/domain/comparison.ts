@@ -1,4 +1,5 @@
-import { ChangedFile, DraftResource, Link, ReviewResource, ReviewSnapshot } from './model';
+import { ChangedFile, DiffMode, DraftResource, Link, ReviewResource, ReviewSnapshot } from './model';
+import type { PublicActivity } from './activity';
 
 export interface DiffVersion { scope: 'draft' | 'published'; revision: number; id: number; }
 export interface RemoteFile extends ChangedFile {
@@ -14,6 +15,7 @@ export interface ReviewComment {
     public: boolean;
     extra_data: Record<string, unknown>;
     links: Record<string, Link>;
+    timestamp?: string; issue_opened?: boolean; issue_status?: string; interfilediff?: unknown; base_filediff_id?: number | null;
 }
 export interface ReviewerDraft {
     id: number;
@@ -40,8 +42,24 @@ export interface RemoteComparison {
     reviewerComments: ReviewComment[];
     details: DraftResource | ReviewResource;
     requestSnapshot: ReviewSnapshot | null;
+    submissionMode?: DiffMode;
+    patchHash?: string;
+    activity?: PublicActivity;
+    serverToken?: string;
 }
 export interface LineMap { rows: [number, number | null, number | null][]; }
+export interface SourceRange { side: 'base' | 'head'; start: number; end: number; }
+/** Resolve real rows from this exact filediff; never estimate an absent line. */
+export function sourceRange(map: LineMap, first: number, count: number, preferred: 'base' | 'head' = 'head'): SourceRange | undefined {
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || first < 1 || count < 1) { return; }
+    const rows = map.rows.filter(row => row[0] >= first && row[0] < first + count);
+    if (!rows.some(row => row[0] === first) || !rows.some(row => row[0] === first + count - 1)) { return; }
+    for (const side of [preferred, preferred === 'head' ? 'base' as const : 'head' as const]) {
+        const lines = rows.flatMap(row => row[side === 'base' ? 1 : 2] == null ? [] : [row[side === 'base' ? 1 : 2]!]).filter(line => line > 0);
+        if (lines.length) { return { side, start: lines.reduce((a, b) => Math.min(a, b)), end: lines.reduce((a, b) => Math.max(a, b)) }; }
+    }
+    return;
+}
 export interface InlineDraft {
     id: string;
     fileId: number;

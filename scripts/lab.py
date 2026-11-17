@@ -87,6 +87,8 @@ def setup():
     marker_text = "\n# RBTFlow local development settings\n"
     settings.write_text(settings.read_text().split(marker_text)[0] + marker_text +
                         'DEBUG = True\nEMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"\n' +
+                        '# Disposable loopback lab: integration tests create thousands of API calls.\n'
+                        'API_ANONYMOUS_LIMIT_RATE = "100000/h"\nAPI_AUTHENTICATED_LIMIT_RATE = "100000/h"\n' +
                         f'STATICFILES_DIRS = [{str(SITE / "htdocs/static")!r}]\n' +
                         'STATICFILES_FINDERS = ["django.contrib.staticfiles.finders.FileSystemFinder",\n'
                         '    "django.contrib.staticfiles.finders.AppDirectoriesFinder",\n'

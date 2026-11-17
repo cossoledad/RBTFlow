@@ -43,23 +43,29 @@ export function pickRecipients(backend: RBToolsAdapter, current: Recipients, log
 
 /** Multiline input uses the native editor and standard Save gesture. */
 export class NativeInputs implements vscode.Disposable {
-    private readonly bindings = new Map<string, (text: string) => Promise<void>>();
+    private readonly bindings = new Map<string, { save: (text: string) => Promise<void>; owner?: string; name: string }>();
     private readonly saved: vscode.Disposable;
     constructor(private readonly storage: string, private readonly log: vscode.LogOutputChannel) {
         this.saved = vscode.workspace.onDidSaveTextDocument(document => {
             const binding = this.bindings.get(document.uri.toString());
-            if (binding) { void binding(document.getText()).catch(error => { this.log.error('Could not save input', error); }); }
+            if (binding) { void binding.save(document.getText()).catch(error => { this.log.error('Could not save input', error); }); }
         });
     }
-    async edit(name: string, content: string, save: (text: string) => Promise<void>): Promise<void> {
+    hasOpen(owner: string, prefix: string): boolean {
+        return vscode.workspace.textDocuments.some(document => {
+            const binding = this.bindings.get(document.uri.toString());
+            return binding?.owner === owner && binding.name.startsWith(prefix);
+        });
+    }
+    async edit(name: string, content: string, save: (text: string) => Promise<void>, owner?: string): Promise<void> {
         const inputs = path.join(this.storage, 'inputs'); await mkdir(inputs, { recursive: true, mode: 0o700 });
         const directory = await mkdtemp(path.join(inputs, 'edit-')), filename = path.join(directory, name + '.md');
         await writeFile(filename, content, { mode: 0o600 });
         const uri = vscode.Uri.file(filename); let queue = Promise.resolve();
-        this.bindings.set(uri.toString(), async text => {
+        this.bindings.set(uri.toString(), { owner, name, save: async text => {
             if (text.length > 200_000 || text.includes('\0')) { throw new Error('Input is too long or contains NUL.'); }
             queue = queue.catch(() => {}).then(() => save(text)); await queue;
-        });
+        } });
         await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: false });
         vscode.window.setStatusBarMessage('Save to apply changes', 4000);
     }
