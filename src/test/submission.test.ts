@@ -12,6 +12,7 @@ import { RequestSession } from '../application/requestSession';
 import { FeedbackSession } from '../application/feedbackSession';
 import { bindingKey, CommitConflictError, readBinding, ServerDiff } from '../domain/submission';
 import { ReviewWrite } from '../domain/comparison';
+import { patchDigest } from '../domain/model';
 import { FilePending, fields, git, input, labApi, labRoot, project, rbtPath, temporary, uniqueFixtureHead } from './helpers';
 
 async function setup(branch = 'feature/merged') {
@@ -84,9 +85,9 @@ test('commit ownership prevents duplicate uploads and upgrades legacy conflicted
     const original = await first.post(plan.id, plan.input, fields);
     const otherStore = new FilePending(path.join(f.dir, 'conflict.json')); await otherStore.initialize();
     const other = new ReviewSession(f.root, new GitAdapter(), f.factory, otherStore), duplicate = await other.preview(input);
-    assert.equal(other.conflict?.requests[0]?.id, original.id);
     const adapter = f.factory(f.server), before = (await adapter.list<{ id: number }>('/review-requests/', 'review_requests', { 'from-user': 'admin', repository: '1', status: 'all' })).map(review => review.id);
     await assert.rejects(other.post(duplicate.id, duplicate.input, fields), CommitConflictError);
+    assert.equal(other.conflict?.requests[0]?.id, original.id);
     assert.equal(otherStore.load(), undefined);
     assert.deepEqual((await adapter.list<{ id: number }>('/review-requests/', 'review_requests', { 'from-user': 'admin', repository: '1', status: 'all' })).map(review => review.id), before);
     // Simulate an old client that uploaded before checking HEAD ownership.
@@ -148,9 +149,12 @@ test('legacy history requests remain readable, publishable and reviewable; nonli
 test('three explicit diff modes preserve their transport and commit identity on the real server', { timeout: 150_000 }, async () => {
     for (const mode of ['bound', 'squash', 'history'] as const) {
         const f = await setup('feature/linear'), adapter = f.factory(f.server);
-        const session = new ReviewSession(f.root, new GitAdapter(), f.factory, f.store), plan = await session.preview({ ...input, mode });
+        const targetRef = 'aaa/fea_bbb';
+        await git(f.root, 'branch', targetRef, input.targetRef);
+        const session = new ReviewSession(f.root, new GitAdapter(), f.factory, f.store), plan = await session.preview({ ...input, mode, targetRef });
         assert.equal(plan.input.mode, mode); assert.equal(plan.bindingVersion, mode === 'bound' ? 1 : undefined);
         const saved = await session.post(plan.id, plan.input, fields), remote = await new ReviewBrowser(f.factory).open(f.server, saved.id);
+        assert.equal(remote.details.branch, targetRef);
         assert.equal(remote.submissionMode, mode); assert.equal(remote.review.created_with_history, mode === 'history');
         const diff = (await adapter.api<{ diff: ServerDiff }>(`/review-requests/${saved.id}/draft/diffs/1/`)).diff;
         assert.equal(!!readBinding(diff.extra_data?.[bindingKey]), mode === 'bound');
@@ -158,6 +162,30 @@ test('three explicit diff modes preserve their transport and commit identity on 
         if (mode === 'squash') { assert.notEqual(remote.details.commit_id, plan.git.head); }
         if (mode === 'history') { assert((diff.commit_count ?? 0) > 0); }
         await new RequestSession(f.factory, { load: () => undefined, save: async () => {} }).publish(remote);
+        assert.equal((await adapter.snapshot(saved.id)).review.branch, targetRef);
+        await git(f.root, 'branch', '-d', targetRef);
         await f.cleanup();
     }
+});
+
+test('a reordered preview verifies against the server without weakening the publish gate', { timeout: 90_000 }, async () => {
+    const f = await setup();
+    class ReorderedPreview extends RBToolsAdapter {
+        override async diff(...args: Parameters<RBToolsAdapter['diff']>): Promise<Buffer> {
+            const patch = await super.diff(...args);
+            const blocks = patch.toString('latin1').replace(/\n+$/, '').split(/\n(?=diff --git )/);
+            assert(blocks.length > 1);
+            return Buffer.from(blocks.reverse().join('\n') + '\n', 'latin1');
+        }
+    }
+    const factory = (server: string) => new ReorderedPreview(f.root, f.factory(server).options);
+    const session = new ReviewSession(f.root, new GitAdapter(), factory, f.store);
+    const plan = await session.preview(input);
+    assert.equal(plan.patchHash, patchDigest(session.patch!));
+    const saved = await session.post(plan.id, plan.input, fields);
+    const adapter = f.factory(f.server);
+    assert.notEqual(await adapter.patchHash(saved.id, saved.diffRevision, 'draft'), plan.patchHash);
+    const remote = await new ReviewBrowser(f.factory).open(f.server, saved.id);
+    assert((await new RequestSession(f.factory, { load: () => undefined, save: async () => {} }).publish(remote)).published);
+    await f.cleanup();
 });

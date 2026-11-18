@@ -96,6 +96,7 @@ export class ReviewSidebar implements vscode.Disposable {
             this.item('reviewers', 'Reviewers', people || 'None', 'organization', 'submit', 'reviewers'),
             this.item('bugs', 'Bugs', c.form.bugs.join(', ') || 'None', 'issues', 'submit', 'bugs'),
             this.item('message', 'Message', c.form.summary || 'From commits', 'git-commit', 'submit', 'details')];
+        if (c.lastDraft) { rows.push(this.item('openDraft', 'Open draft', `#${c.lastDraft.id}`, 'go-to-file', 'submit', 'openDraft')); }
         const comparison = c.comparison();
         if (comparison?.kind === 'local') {
             for (const [key, value] of [['BASE', comparison.plan.git.base], ['HEAD', comparison.plan.git.head]]) {
@@ -108,8 +109,17 @@ export class ReviewSidebar implements vscode.Disposable {
     private reviewItems(): NativeItem[] {
         const c = this.current; if (!c) { return []; }
         const rows: NativeItem[] = [], remote = c.browser.current;
-        if (c.pending) { rows.push(this.item('recover', 'Check server', '', 'sync', 'review', 'recover')); }
         const pending = c.session.pending;
+        if (c.pending && (!pending?.patchMismatch || c.requestSession.store.load() || c.feedbackSession.store.load())) {
+            rows.push(this.item('recover', 'Check server', '', 'sync', 'review', 'recover'));
+        }
+        if (pending?.patchMismatch) {
+            rows.push(this.item('patchMismatch', 'Diff does not match preview', `#${pending.id}`, 'warning', 'review'));
+            rows.push(this.item('openUnverifiedDraft', 'Open draft', `#${pending.id}`, 'go-to-file', 'review', 'openUnverifiedDraft'));
+            rows.push(this.item('keepMismatchDraft', 'Keep draft and continue', '', 'archive', 'review', 'keepConflictDraft'));
+        } else if (c.retainedPatchMismatch) {
+            rows.push(this.item('patchMismatch', 'Diff does not match preview', '', 'warning', 'review'));
+        }
         const conflict = c.session.conflict ?? c.retainedConflict;
         if (conflict) {
             rows.push(this.item('commitConflict', 'HEAD already linked', pending?.id ? `Draft #${pending.id} kept` : '', 'warning', 'review'));
@@ -118,10 +128,14 @@ export class ReviewSidebar implements vscode.Disposable {
             }
             if (pending?.commitConflict) { rows.push(this.item('keepConflictDraft', 'Keep draft and continue', '', 'archive', 'review', 'keepConflictDraft')); }
         }
-        if (pending?.kind === 'post' && pending.plan.bindingVersion && pending.bindingCheckpoint && pending.id && !pending.commitConflict) {
+        if (pending?.kind === 'post' && pending.plan.bindingVersion && pending.bindingCheckpoint && pending.id
+            && !pending.commitConflict && !pending.patchMismatch && !pending.fieldsSynced) {
             rows.push(this.item('completeDraft', 'Complete draft', `#${pending.id}`, 'check', 'review', 'completeDraft'));
         }
-        if (!remote) { return rows; }
+        if (!remote) {
+            if (c.lastRequest) { rows.push(this.item('lastRequest', `Open last request #${c.lastRequest.id}`, '', 'history', 'review', 'lastRequest')); }
+            return rows;
+        }
         if (c.remoteOutdated) { rows.push(this.item('latest', 'New diff available', 'Open latest', 'sync', 'review', 'latest')); }
         const details = remote.details, reviewers = [...details.target_people.map(value => value.title!), ...details.target_groups.map(value => '@' + value.title!)];
         rows.push(this.item('request', `#${remote.requestId} ${details.summary}`, remote.review.links.submitter?.title ?? '', 'git-pull-request', 'review', 'select'),
@@ -148,6 +162,7 @@ export class ReviewSidebar implements vscode.Disposable {
             } else if (!c.feedbackSession.store.load()) {
                 if (c.feedback.body.trim() || c.feedback.shipIt || c.feedback.comments.length) { rows.push(this.item('saveReview', 'Save review', '', 'save', 'review', 'saveReview')); }
                 if (c.feedbackSession.receipt && !c.feedbackSession.receipt.published) { rows.push(this.item('publishReview', 'Publish review', '', 'send', 'review', 'publishReview')); }
+                if (c.feedback.shipIt && !c.pending) { rows.push(this.item('publishShipIts', 'Publish Ship Its…', '', 'pass', 'review', 'publishShipIts')); }
             }
         }
         return rows;
@@ -164,7 +179,7 @@ export class ReviewSidebar implements vscode.Disposable {
             : comparison ? `#${comparison.requestId} · ${comparison.selected.scope === 'draft' ? 'Draft ' : ''}v${comparison.selected.revision}` : '';
         this.changes.update(c?.root ?? '', nextId, label, comparison?.kind === 'local' ? comparison.plan.git.files : comparison?.files ?? [], c?.store.get<ChangesLayout>('changesLayout') ?? 'tree');
         const contexts = { busy: !!c?.busy, hasPending: !!c?.pending, canCreate: !!c?.canCreate && !c.busy, hasReview: !!remote, canEditRequest: !!c?.canEditRequest && !c.busy,
-            canPublishRequest: !!c?.canPublishRequest && !c.busy, hasComparison: !!comparison };
+            canPublishRequest: !!c?.canPublishRequest && !c.busy, canDiscardRequest: !!c?.canDiscardRequest && !c.busy, hasComparison: !!comparison };
         for (const [key, value] of Object.entries(contexts)) { void vscode.commands.executeCommand('setContext', `rbtflow.${key}`, value); }
         this.submit.refresh(); this.review.refresh();
         this.inbox.follow(c);
@@ -172,6 +187,7 @@ export class ReviewSidebar implements vscode.Disposable {
     async run(action: Action): Promise<void> {
         const c = this.current; if (!c || c.root !== action.root || c.busy) { return; }
         if (action.action === 'target') { await c.settings('targetRef'); }
+        else if (action.action === 'openDraft') { if (await c.openDraft()) { await vscode.commands.executeCommand('rbtflow.review.focus'); } }
         else if (action.action === 'reviewers') { await c.editRecipients(action.section); }
         else if (action.action === 'bugs') { await c.editDetails(action.section, 'bugs'); }
         else if (action.action === 'details') { await c.editDetails(action.section); }
@@ -183,11 +199,17 @@ export class ReviewSidebar implements vscode.Disposable {
         else if (action.action === 'comment') { await c.editFeedback(); }
         else if (action.action === 'saveReview') { await c.saveFeedback(); }
         else if (action.action === 'publishReview') { await c.saveFeedback(true); }
+        else if (action.action === 'publishShipIts') { await c.publishShipIts(); }
         else if (action.action === 'reloadFeedback') { await c.reloadFeedback(); }
         else if (action.action === 'recover') { await c.recover(); }
         else if (action.action === 'completeDraft') { await c.completeDraft(); }
         else if (/^commitOwner:[1-9]\d*$/.test(action.action)) { await c.continueFromConflict(Number(action.action.split(':')[1])); }
         else if (action.action === 'keepConflictDraft') { await c.continueFromConflict(); }
+        else if (action.action === 'openUnverifiedDraft') {
+            const pending = c.session.pending;
+            if (pending?.patchMismatch && pending.id) { await c.openRemote(pending.id, undefined, pending.plan.server); }
+        }
+        else if (action.action === 'lastRequest' && c.lastRequest) { await c.openRemote(c.lastRequest.id, undefined, c.lastRequest.server); }
         else if (action.action === 'browser') { await this.openUrl(); }
     }
     async createDraft(): Promise<void> { if (await this.current?.createDraft()) { await vscode.commands.executeCommand('rbtflow.review.focus'); } }

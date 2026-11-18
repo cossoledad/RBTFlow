@@ -6,13 +6,15 @@ import {
 } from '../domain/model';
 import { ProcessError, runProcess } from './process';
 import { diffPrefix, LineMap, RemoteComparison, ReviewerDraft, ReviewComment } from '../domain/comparison';
-import { assertBoundCommit, bindingFor, bindingKey, fileSetHash, fullCommitId, readBinding, ReviewSafetyError, ServerDiff } from '../domain/submission';
+import { assertBoundCommit, bindingFor, bindingKey, CommitBinding, fileSetHash, fullCommitId, PatchMismatchError, readBinding, ReviewSafetyError, ServerDiff } from '../domain/submission';
 import { snapshotFingerprint } from '../domain/snapshot';
 import { PublicActivity, WatchResult } from '../domain/activity';
 
 export class ApiError extends Error {
     constructor(message: string, readonly code: number, readonly notApplied = false, readonly brief?: string) { super(message); }
 }
+const rateLimits = new Map<string, number>();
+const rateLimitError = () => new ApiError('Review Board API rate limit', 114, false, 'Review Board rate limit. Try again in a minute.');
 export interface RbtOptions {
     executable: string;
     storage: string;
@@ -37,6 +39,10 @@ export class RBToolsAdapter {
     constructor(readonly root: string, readonly options: RbtOptions) {}
     async command(args: string[], signal?: AbortSignal, files: Record<string, string> = {}, trailing: string[] = []): Promise<Buffer> {
         const url = serverUrl(this.options.server);
+        const rateKey = url ? new URL(url).origin : '';
+        if ((rateLimits.get(rateKey) ?? 0) > Date.now() && args[0] !== '--version' && args[0] !== 'rbtflow-defaults') {
+            throw rateLimitError();
+        }
         const token = url ? await this.options.token?.(url) : undefined;
         const storage = path.join(this.options.storage, 'jobs');
         await mkdir(storage, { recursive: true, mode: 0o700 });
@@ -69,10 +75,16 @@ export class RBToolsAdapter {
             if (error instanceof ProcessError) {
                 let message = error.message;
                 if (error.reason === 'exit') {
+                    let code: number | undefined;
                     try {
-                        const payload = JSON.parse(error.stdout.toString('utf8')) as { errors?: string[] };
+                        const payload = JSON.parse(error.stdout.toString('utf8')) as { errors?: string[]; err?: { code?: number } };
                         if (Array.isArray(payload.errors)) { message = payload.errors.join('\n'); }
+                        code = payload.err?.code;
                     } catch { /* Raw CLI diagnostics remain available below. */ }
+                    if (code === 114 || /API Error 114\b/.test(message + '\n' + error.stderr.toString('utf8'))) {
+                        rateLimits.set(rateKey, Date.now() + 60_000);
+                        throw rateLimitError();
+                    }
                 }
                 const clean = new ProcessError(redact(message), Buffer.from(redact(error.stdout.toString('utf8'))),
                     Buffer.from(redact(error.stderr.toString('utf8'))), error.reason);
@@ -140,10 +152,22 @@ export class RBToolsAdapter {
             { '--fields-file': JSON.stringify(payload) }, [String(id)])).toString('utf8')) as { error?: { code: number; message: string }; not_applied?: boolean };
         if (result.error) { throw new ApiError(result.error.message, result.error.code, result.not_applied); }
     }
-    async patchHash(id: number, revision: number, scope: 'draft' | 'published', signal?: AbortSignal): Promise<string> {
+    async discardRequest(id: number, snapshot: ReviewSnapshot, author: string, signal?: AbortSignal): Promise<void> {
+        const payload = {
+            author, public: snapshot.review.public, request_updated: snapshot.review.last_updated,
+            draft_updated: snapshot.draft?.last_updated ?? null, draft_id: snapshot.draft?.id ?? null,
+        };
+        const result = JSON.parse((await this.command(['rbtflow-discard-request', '--json', '--disable-cache'], signal,
+            { '--fields-file': JSON.stringify(payload) }, [String(id)])).toString('utf8')) as {
+                discarded?: boolean; error?: { code: number; message: string }; not_applied?: boolean;
+            };
+        if (result.error) { throw new ApiError(result.error.message, result.error.code, result.not_applied, result.error.code === 409 ? result.error.message : undefined); }
+        if (!result.discarded) { throw new Error('Discard result is unknown. Check the server.'); }
+    }
+    async patchHash(id: number, revision: number, scope: 'draft' | 'published', signal?: AbortSignal, format?: CommitBinding['patchFormat']): Promise<string> {
         const result = JSON.parse((await this.command(['rbtflow-verify-patch', '--json', '--disable-cache',
-            String(id), String(revision), scope], signal)).toString('utf8')) as { patch_hash: string };
-        return result.patch_hash;
+            String(id), String(revision), scope], signal)).toString('utf8')) as { patch_hash: string; patch_content_hash: string };
+        return format ? result.patch_content_hash : result.patch_hash;
     }
     async comparisonData(comparison: RemoteComparison, fileId: number, part: 'base' | 'head' | 'patch', signal?: AbortSignal): Promise<Buffer> {
         const payload = JSON.parse((await this.command(['rbtflow-read-comparison', '--json', '--disable-cache',
@@ -220,7 +244,7 @@ export class RBToolsAdapter {
         const args = ['post', '--json', '--disable-cache', '--repository-type=git', `--repository=${plan.repository.name}`,
             `--tracking-branch=${plan.input.targetRef}`, '--git-find-renames-threshold=50', '--guess-fields=no',
             plan.input.mode === 'history' ? '--with-history' : '--squash-history',
-            `--summary=${fields.summary.trim()}`,
+            `--summary=${fields.summary.trim()}`, `--branch=${fields.branch}`,
             `--field=rbtflow_plan_id=${plan.id}`];
         if (plan.bindingVersion) { args.push('--field=rbtflow_binding_version=1'); }
         if (plan.input.reviewId) { args.push('-r', String(plan.input.reviewId), `--change-description=${fields.changeDescription}`); }
@@ -230,13 +254,13 @@ export class RBToolsAdapter {
         if (result.status !== 'success' || !Number.isSafeInteger(result.review_request_id)) { throw new Error('post 未返回有效审核单 ID；请检查服务器状态。'); }
         return result.review_request_id;
     }
-    async commitRequests(plan: ReviewPlan, excludeId = plan.input.reviewId ?? 0, signal?: AbortSignal): Promise<CommitConflict['requests']> {
+    async commitRequests(plan: ReviewPlan, excludeId = plan.input.reviewId ?? 0, signal?: AbortSignal, scanDrafts = true): Promise<CommitConflict['requests']> {
         const result = JSON.parse((await this.command(['rbtflow-find-commit', '--json', '--disable-cache',
-            String(plan.repository.id), plan.git.head, String(excludeId)], signal)).toString('utf8')) as { username: string; requests: CommitConflict['requests'] };
+            String(plan.repository.id), plan.git.head, String(excludeId), scanDrafts ? '12' : '0'], signal)).toString('utf8')) as { username: string; requests: CommitConflict['requests'] };
         if (result.username !== plan.username) { throw new ReviewSafetyError('Account changed. Sign in as the original author.'); }
         return result.requests;
     }
-    async replaceFields(plan: ReviewPlan, fields: ReviewFields, id: number, signal?: AbortSignal, expected?: ReviewSnapshot): Promise<void> {
+    async replaceFields(plan: ReviewPlan, fields: ReviewFields, id: number, signal?: AbortSignal, expected?: ReviewSnapshot, verifiedDiff?: ServerDiff): Promise<void> {
         const values: Record<string, string> = { summary: fields.summary.trim(), description: fields.description,
             testing_done: fields.testing, target_people: fields.people.join(','), target_groups: fields.groups.join(','),
             bugs_closed: fields.bugs.join(','), branch: fields.branch, description_text_type: 'plain',
@@ -244,8 +268,8 @@ export class RBToolsAdapter {
         if (plan.previous?.review.public) { values.changedescription = fields.changeDescription; values.changedescription_text_type = 'plain'; }
         if (plan.bindingVersion) {
             if (!fullCommitId(plan.git.head)) { throw new ReviewSafetyError('A full Git HEAD SHA is required. Preview again.'); }
-            const diffs = await this.list<ServerDiff>(`/review-requests/${id}/draft/diffs/`, 'diffs', {}, signal);
-            const diff = diffs.sort((a, b) => b.revision - a.revision)[0];
+            const diff = verifiedDiff ?? (await this.list<ServerDiff>(`/review-requests/${id}/draft/diffs/`, 'diffs', {}, signal))
+                .sort((a, b) => b.revision - a.revision)[0];
             if (!diff) { throw new ReviewSafetyError('Uploaded diff is missing. Check the server.'); }
             values.commit_id = plan.git.head;
             values['extra_data.rbtflow_binding_version'] = '1';
@@ -272,10 +296,15 @@ export class RBToolsAdapter {
         if (!diff) { throw new ReviewSafetyError('The uploaded diff is missing. Check the server.'); }
         const files = await this.list<{ dest_file: string; source_file: string }>(`${prefix}${diff.revision}/files/`, 'files', {}, signal);
         if (fileSetHash(files.map(file => file.dest_file || file.source_file)) !== fileSetHash(plan.git.files.map(file => file.path))) {
-            throw new ReviewSafetyError('The uploaded files do not match the preview. Check the server.');
+            this.options.log?.(`File set mismatch on #${id}, diff ${diff.id} v${diff.revision}`);
+            throw new PatchMismatchError(id);
         }
-        if (await this.patchHash(id, diff.revision, published ? 'published' : 'draft', signal) !== plan.patchHash) {
-            throw new ReviewSafetyError('The uploaded patch does not match the preview. Check the server.');
+        const expected = plan.patchContentHash ?? plan.patchHash;
+        const format = plan.patchContentHash ? 'git-blocks-v1' : undefined;
+        const observed = await this.patchHash(id, diff.revision, published ? 'published' : 'draft', signal, format);
+        if (observed !== expected) {
+            this.options.log?.(`Patch mismatch on #${id}, diff ${diff.id} v${diff.revision} (${format ?? 'raw'}): expected ${expected}, received ${observed}`);
+            throw new PatchMismatchError(id);
         }
         return diff;
     }
@@ -296,7 +325,7 @@ export class RBToolsAdapter {
         const diff = await this.verifyUploaded(plan, id, published, signal);
         if (plan.bindingVersion) {
             const binding = readBinding(diff.extra_data?.[bindingKey]), expected = bindingFor(plan, diff);
-            if (!binding || Object.entries(expected).some(([key, value]) => binding[key as keyof typeof binding] !== value)) { throw new ReviewSafetyError('The uploaded diff has no matching HEAD binding. Check the server.'); }
+            if (!binding || binding.patchFormat !== expected.patchFormat || Object.entries(expected).some(([key, value]) => binding[key as keyof typeof binding] !== value)) { throw new ReviewSafetyError('The uploaded diff has no matching HEAD binding. Check the server.'); }
             assertBoundCommit(binding, details, diff);
         }
         if ((await this.snapshot(id, signal)).fingerprint !== snapshot.fingerprint) { throw new ReviewSafetyError('The request changed during verification. Check the server.'); }

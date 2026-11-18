@@ -1,7 +1,8 @@
 import { ReviewFields, ReviewInput } from '../domain/model';
 
 export interface FormData extends ReviewInput, ReviewFields {}
-export interface RepositorySettings { rbtPath?: string; timeoutSeconds?: number; notificationsEnabled?: boolean; pollIntervalSeconds?: number; }
+export type PluginMode = 'minimal' | 'full';
+export interface RepositorySettings { mode?: PluginMode; rbtPath?: string; timeoutSeconds?: number; notificationsEnabled?: boolean; pollIntervalSeconds?: number; }
 export interface StateStorage {
     get<T>(key: string): T | undefined;
     update(key: string, value: unknown): PromiseLike<void>;

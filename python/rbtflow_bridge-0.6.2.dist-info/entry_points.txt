@@ -3,6 +3,7 @@ rbtflow-defaults = rbtflow_bridge:Defaults
 rbtflow-guess-message = rbtflow_bridge:GuessMessage
 rbtflow-publish-request = rbtflow_bridge:PublishRequest
 rbtflow-edit-request = rbtflow_bridge:EditRequest
+rbtflow-discard-request = rbtflow_bridge:DiscardRequest
 rbtflow-context = rbtflow_bridge:Context
 rbtflow-sync-draft = rbtflow_bridge:SyncDraft
 rbtflow-verify-patch = rbtflow_bridge:VerifyPatch

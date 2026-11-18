@@ -53,9 +53,11 @@ Legacy journals keep their original mode and verification contract. Version 0.5 
 Legacy History requests remain readable, reviewable and publishable. Compatible linear updates retain History; nonlinear/empty-commit updates give a short instruction to create a new final-diff request.
 Unmanaged older requests without a binding remain publishable under the existing metadata/diff checks.
 
-## Commit conflicts and recovery (0.6.1)
+New plans compare complete Git file blocks by content regardless of their order in the downloaded patch. Header and hunk bytes remain part of each block hash, and legacy bindings retain raw validation. RBTFlow verifies the uploaded artifact before binding. A persistent mismatch offers **Open draft** or **Keep draft and continue**. After keeping the draft, use **Update Request Diff** on the same request to submit a fresh, verified diff.
 
-A repository can already associate a HEAD with another request or draft. Before preview/create/update in the bound mode, RBTFlow checks accessible request commit IDs and the current author's private draft commit IDs. The request being explicitly updated is excluded; another user's private draft is never probed. An unavailable preflight fails before upload.
+## Commit conflicts and recovery
+
+Bound previews query exact request commit IDs. Before upload, RBTFlow also checks up to 12 of the signed-in user's drafts. The request being explicitly updated is excluded. Review Board's commit uniqueness check remains authoritative. API error 114 pauses subsequent commands for that server for 60 seconds.
 
 If ownership is known, Review offers **Open existing #ID** and prevents duplicate creation. A race that returns API 227 after upload persists a separate commit-conflict state with the original draft ID/checkpoint. Older partial-upload journals are classified by read-only inspection on startup or Check server. Check server and Complete draft cannot repeat a binding write while a conflict remains.
 
@@ -93,4 +95,4 @@ References: [native draft commit update](https://www.reviewboard.org/docs/manual
 
 ## Read-only browser visits and refresh
 
-Request snapshots compare editable content and artifact identities, not the lazily computed `calculated_trophies` cache or approval/issue counters. Unknown extra data, timestamps, author/repository links and actual editable fields remain protected. Pending journals from older builds are compared by recomputing both snapshots. Public activity/counters have a separate refresh token. See [refresh behavior](extension.md#自动刷新与外部编辑) and [web parity roadmap](web-parity.md).
+Request snapshots compare editable content and artifact identities, not the lazily computed `calculated_trophies` cache or approval/issue counters. Unknown extra data, timestamps, author/repository links and actual editable fields remain protected. Pending journals from older builds are compared by recomputing both snapshots. Public activity/counters have a separate refresh token. See [refresh behavior](extension.md#插件模式与自动刷新) and [web parity roadmap](web-parity.md).

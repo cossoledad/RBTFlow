@@ -9,6 +9,16 @@ export function patchDigest(patch: Buffer): string {
     return digest(patch.subarray(0, end));
 }
 
+/** Review Board can return the same Git file patches in a different order. */
+export function patchContentDigest(patch: Buffer): string {
+    const blocks = patch.toString('latin1').split(/\n(?=diff --git )/);
+    if (!blocks[0]?.startsWith('diff --git ')) { return patchDigest(patch); }
+    const headers = blocks.map(block => block.split('\n', 1)[0]);
+    if (new Set(headers).size !== blocks.length) { return patchDigest(patch); }
+    const hashes = blocks.map(block => patchDigest(Buffer.from(block, 'latin1'))).sort();
+    return digest(hashes.join('\n'));
+}
+
 export function serverUrl(value: string): string {
     if (!value.trim()) { return ''; }
     const url = new URL(value.trim());
@@ -95,6 +105,7 @@ export interface ReviewPlan {
     serverVersion: string;
     username: string;
     patchHash: string;
+    patchContentHash?: string;
     previous: ReviewSnapshot | null;
     /** Absent on journals created before the final-diff/HEAD binding contract. */
     bindingVersion?: 1;
@@ -106,6 +117,8 @@ export interface Receipt {
 export interface PendingWrite {
     kind: 'post' | 'publish'; plan: ReviewPlan; fields: ReviewFields; id?: number;
     bindingCheckpoint?: ReviewSnapshot;
+    fieldsSynced?: boolean;
+    patchMismatch?: boolean;
     commitConflict?: CommitConflict;
 }
 export interface CommitConflict {

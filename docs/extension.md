@@ -1,4 +1,4 @@
-# RBTFlow 0.6.1 (development)
+# RBTFlow 0.6.2 (development)
 
 全部交互使用 VS Code 原生控件，默认简短英文。没有 Webview、HTML 输入框、select 或自绘折叠区域。
 运行时复用工作区机器上的 Git/RBTools，连接现有 Review Board；本地站点只供开发，不使用 Docker。
@@ -68,9 +68,15 @@ Inbox 只列当前连接中直接或通过审批组分配给当前登录用户�
 阅读记录保存在 globalState，按服务器 + 登录账号隔离，在同一扩展 profile/宿主内跨仓库共享；不写入服务器，也不与浏览器阅读状态同步。
 阅读不代表 Ship It；审批仍使用 Review 原有的意见、Ship It、Save Review / Publish Review 流程。
 
-## 自动刷新与外部编辑
+## 插件模式与自动刷新
 
-默认每 60 秒刷新；窗口重新获得焦点也会检查，关闭自动刷新后手动 Refresh Inbox 仍可刷新当前请求。
+Review 工具栏的 Clear Review 清空当前选择及 Changes，保留服务器草稿和本地意见。Submit 中的 Open draft 可重新进入上一次打开或创建的草稿。Discard 需要确认。已发布请求有未发布修改时只丢弃修改草稿，其余自己的待审请求会关闭为 Discarded。
+
+Repository Settings → Plugin mode 默认使用 Minimal。启动后可以按 ID 或 Open last request 手动打开审核，预览、创建和发布草稿以及评论、Ship It 均由当前操作触发。Full 模式提供 Inbox 与自动刷新，可单独关闭通知轮询。
+
+勾选 Ship It 后，Publish Ship Its 可选择 1–10 条独立审阅。当前意见和行内评论随第一条发布，后续沿用当前账号。部分失败时查看 Output 和待核对记录，按已确认数量继续。项目审批门槛由服务端判定。
+
+Full 模式默认每 60 秒刷新，窗口重新获得焦点也会检查。关闭自动刷新后手动 Refresh Inbox 仍可刷新当前请求。
 分配给自己的待审单与自己发布的 pending 请求通过 last-update 检测公开评论、回复、Diff 和元数据活动；审批/issue 计数补充变化检测。
 自己发布的请求收到反馈也会通知，但当前 Inbox 列表仍只列直接/组分配，统一活动队列属于后续规划。
 首次同步静默，按服务器/账号去重，自己的公开审阅动作不会反复通知；读取失败不推进活动游标。
@@ -140,7 +146,8 @@ Open existing 或 Keep draft and continue 会先保存完整本地恢复归档�
 | rbtflow.rbtPath | rbt | 工作区机器的 executable，不接受 shell 参数 |
 | rbtflow.serverUrl | 空 | 仓库没有缓存时的默认值，空使用 RBTools 配置 |
 | rbtflow.commandTimeoutSeconds | 120 | 单条命令超时，5–1800 秒 |
-| rbtflow.notifications.enabled | true | 待审列表自动刷新和内容更新通知 |
+| rbtflow.mode | minimal | 仓库默认插件模式，可在 Repository Settings 覆盖 |
+| rbtflow.notifications.enabled | true | Full 模式的自动刷新和通知 |
 | rbtflow.notifications.pollIntervalSeconds | 60 | 刷新间隔，30–3600 秒 |
 
 兼容 rbt login 和已有证书配置，保留实际配置 URL 及代理前缀；Token 不进入 argv，日志脱敏。
@@ -181,7 +188,7 @@ bash dev.sh watch
 bash dev.sh test          # 核心、缓存、通知并发/隔离、评论读取
 bash dev.sh integration   # 真实提交、跨用户审阅、服务器草稿和发布恢复
 bash dev.sh host-smoke    # 原生 VS Code 控件验收，自动准备所需本地数据
-bash dev.sh package       # build/rbtflow-0.6.1.vsix
+bash dev.sh package       # build/rbtflow-0.6.2.vsix
 ```
 
 F5 选择 Run RBTFlow (local lab)；成品扩展标识为 ganjinbo.rbtflow，也可使用 Extensions: Install from VSIX。

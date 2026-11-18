@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { GitAdapter } from '../adapters/git';
 import { ApiError, Connection, RBToolsAdapter } from '../adapters/rbtools';
-import { CommitConflict, inputKey, patchDigest, PendingWrite, Receipt, ReviewFields, ReviewInput, ReviewPlan, validateFields, validatePublication } from '../domain/model';
-import { CommitConflictError, ReviewSafetyError } from '../domain/submission';
+import { CommitConflict, inputKey, patchContentDigest, patchDigest, PendingWrite, Receipt, ReviewFields, ReviewInput, ReviewPlan, ReviewSnapshot, validateFields, validatePublication } from '../domain/model';
+import { CommitConflictError, PatchMismatchError, ReviewSafetyError, ServerDiff } from '../domain/submission';
 import { sameSnapshot } from '../domain/snapshot';
 
 export interface PendingStore {
@@ -36,14 +36,15 @@ export class ReviewSession {
         return !!conflict && conflict.head === plan.git.head && conflict.repositoryId === plan.repository.id
             && conflict.server === plan.server && conflict.username === plan.username;
     }
-    private async lookupConflict(plan: ReviewPlan, excludeId?: number, signal?: AbortSignal): Promise<CommitConflict | undefined> {
+    private async lookupConflict(plan: ReviewPlan, excludeId?: number, signal?: AbortSignal, scanDrafts = true): Promise<CommitConflict | undefined> {
         if (!plan.bindingVersion) { return; }
-        const requests = await this.backend(plan.server).commitRequests(plan, excludeId ?? plan.input.reviewId ?? 0, signal);
+        const requests = await this.backend(plan.server).commitRequests(plan, excludeId ?? plan.input.reviewId ?? 0, signal, scanDrafts);
         const previous = this.pending?.commitConflict ?? this.pendingStore.loadConflict?.() ?? this.lastConflict;
         // An empty public query cannot disprove a known 227 with an invisible owner.
         const selfOwnsHead = plan.previous && (plan.previous.draft?.commit_id === plan.git.head || plan.previous.review.commit_id === plan.git.head);
         const conflict = requests.length ? { head: plan.git.head, repositoryId: plan.repository.id, server: plan.server, username: plan.username, requests }
-            : !selfOwnsHead && this.sameCommit(previous, plan) && !previous!.requests.length ? previous : undefined;
+            : !selfOwnsHead && this.sameCommit(previous, plan) && (!previous!.requests.length
+                || !scanDrafts && previous!.requests.some(request => !request.public)) ? previous : undefined;
         this.lastConflict = conflict;
         if (conflict || this.sameCommit(previous, plan)) { await this.pendingStore.saveConflict?.(conflict); }
         return conflict;
@@ -55,6 +56,10 @@ export class ReviewSession {
         const backend = this.backend(pending.plan.server);
         if (await backend.username(signal) !== pending.plan.username) { throw new ReviewSafetyError('Sign in as the original author.'); }
         const snapshot = await backend.snapshot(pending.id, signal);
+        return this.inspectPendingConflict(pending, snapshot, signal);
+    }
+    private async inspectPendingConflict(pending: PendingWrite, snapshot: ReviewSnapshot, signal?: AbortSignal): Promise<CommitConflict | undefined> {
+        if (pending.kind !== 'post' || !pending.plan.bindingVersion || !pending.id || pending.patchMismatch) { return; }
         const bound = (snapshot.draft ?? snapshot.review).commit_id === pending.plan.git.head;
         const conflict = bound ? undefined : await this.lookupConflict(pending.plan, pending.id, signal);
         if (bound && this.sameCommit(this.pendingStore.loadConflict?.() ?? this.lastConflict, pending.plan)) {
@@ -65,8 +70,8 @@ export class ReviewSession {
         }
         return conflict;
     }
-    private async syncBinding(pending: PendingWrite, signal?: AbortSignal): Promise<void> {
-        try { await this.backend(pending.plan.server).replaceFields(pending.plan, pending.fields, pending.id!, signal, pending.bindingCheckpoint); }
+    private async syncBinding(pending: PendingWrite, signal?: AbortSignal, verifiedDiff?: ServerDiff): Promise<void> {
+        try { await this.backend(pending.plan.server).replaceFields(pending.plan, pending.fields, pending.id!, signal, pending.bindingCheckpoint, verifiedDiff); }
         catch (error) {
             if (!(error instanceof ApiError && error.code === 227 && pending.plan.bindingVersion)) { throw error; }
             this.backend(pending.plan.server).options.log?.(`Commit binding rejected (API 227) for draft #${pending.id}: ${error.message}`);
@@ -120,8 +125,13 @@ export class ReviewSession {
         const plan: ReviewPlan = { id: randomUUID(), input: { server: connection.server, repositoryId: repository.id,
             targetRef: input.targetRef, baseRef: input.baseRef, mode, reviewId: input.reviewId }, git,
             server: connection.server, repository, rbtVersion: connection.rbtVersion, serverVersion: connection.version,
-            username: connection.username, patchHash: patchDigest(patch), previous, bindingVersion: mode === 'bound' ? 1 : undefined };
-        await this.lookupConflict(plan, undefined, signal);
+            username: connection.username, patchHash: patchDigest(patch), patchContentHash: patchContentDigest(patch),
+            previous, bindingVersion: mode === 'bound' ? 1 : undefined };
+        try { await this.lookupConflict(plan, undefined, signal, false); }
+        catch (error) {
+            if (!(error instanceof ApiError) || error.code !== 114) { throw error; }
+            backend.options.log?.('Commit lookup deferred because Review Board is rate limiting. Upload will check again.');
+        }
         if (signal?.aborted || generation !== this.generation) { throw new Error('Preview changed. Preview again.'); }
         this.plan = plan; this.patch = patch; this.receipt = undefined;
         return plan;
@@ -141,7 +151,7 @@ export class ReviewSession {
         try {
             validateFields(fields);
             const plan = await this.current(planId, input, signal);
-            if (plan.bindingVersion) { fields = { ...fields, branch: plan.input.targetRef }; }
+            fields = { ...fields, branch: plan.input.targetRef };
             const backend = this.backend(plan.server);
             if (await backend.username(signal) !== plan.username) { throw new Error('登录用户已变化，请重新连接并预览。'); }
             const conflict = await this.lookupConflict(plan, undefined, signal);
@@ -160,8 +170,17 @@ export class ReviewSession {
             await this.pendingStore.save(pending);
             pending.bindingCheckpoint = await backend.snapshot(id, signal);
             await this.pendingStore.save(pending);
-            await this.syncBinding(pending, signal);
-            const receipt = await backend.verify(plan, fields, id, false, signal);
+            let receipt: Receipt;
+            try {
+                const verifiedDiff = plan.patchContentHash ? await backend.verifyUploaded(plan, id, false, signal) : undefined;
+                await this.syncBinding(pending, signal, verifiedDiff);
+                pending.fieldsSynced = true;
+                await this.pendingStore.save(pending);
+                receipt = await backend.verify(plan, fields, id, false, signal);
+            } catch (error) {
+                await this.rememberPatchMismatch(pending, error);
+                throw error;
+            }
             const previous = await backend.snapshot(id, signal);
             if (previous.fingerprint !== receipt.fingerprint) { throw new ReviewSafetyError('The draft changed during verification. Check the server.'); }
             await this.pendingStore.save(undefined);
@@ -178,7 +197,7 @@ export class ReviewSession {
         try {
             validatePublication(fields);
             const plan = await this.current(planId, input, signal), receipt = this.receipt, backend = this.backend(plan.server);
-            if (plan.bindingVersion) { fields = { ...fields, branch: plan.input.targetRef }; }
+            if (plan.bindingVersion || plan.patchContentHash) { fields = { ...fields, branch: plan.input.targetRef }; }
             if (await backend.username(signal) !== plan.username) { throw new Error('登录用户已变化，请重新连接并预览。'); }
             if (input.reviewId !== receipt.id) { throw new Error('当前选择的审核单已变化，请重新预览。'); }
             const saved = await backend.verify(plan, fields, receipt.id, false, signal);
@@ -201,6 +220,7 @@ export class ReviewSession {
         this.assertIdle();
         const pending = this.pending;
         if (!pending) { return this.receipt; }
+        if (pending.patchMismatch && pending.id) { throw new PatchMismatchError(pending.id); }
         this.writing = true;
         try {
             const backend = this.backend(pending.plan.server);
@@ -223,7 +243,7 @@ export class ReviewSession {
             if (!id) { throw new Error('暂未找到完整提交。请检查服务器上的新草稿；确认后可清除待确认状态，不会自动重发。'); }
             if (pending.id !== id) { pending.id = id; await this.pendingStore.save(pending); }
             const snapshot = await backend.snapshot(id, signal);
-            const conflict = await this.inspectConflict(signal);
+            const conflict = await this.inspectPendingConflict(pending, snapshot, signal);
             if (conflict) { throw new CommitConflictError(conflict, id); }
             // A rejected publication leaves the verified draft intact. It is a
             // known draft, not an indefinitely uncertain write.
@@ -231,6 +251,7 @@ export class ReviewSession {
             let receipt: Receipt;
             try { receipt = await backend.verify(pending.plan, pending.fields, id, published, signal); }
             catch (error) {
+                await this.rememberPatchMismatch(pending, error);
                 if (pending.kind === 'post' && pending.plan.bindingVersion && !pending.bindingCheckpoint && snapshot.draft?.extra_data.rbtflow_plan_id === pending.plan.id) {
                     await backend.verifyUploaded(pending.plan, id, false, signal);
                     pending.bindingCheckpoint = snapshot; await this.pendingStore.save(pending);
@@ -243,22 +264,44 @@ export class ReviewSession {
             return receipt;
         } finally { this.writing = false; }
     }
+    private async rememberPatchMismatch(pending: PendingWrite, error: unknown): Promise<void> {
+        if (error instanceof PatchMismatchError && pending.kind === 'post' && !pending.patchMismatch) {
+            pending.patchMismatch = true;
+            await this.pendingStore.save(pending);
+        }
+    }
     /** Explicit recovery only: finish the same uploaded artifact, never post a second diff/request. */
     async completeBinding(signal?: AbortSignal): Promise<Receipt> {
         this.assertIdle(); const pending = this.pending;
         if (pending?.kind !== 'post' || !pending.plan.bindingVersion || !pending.id || !pending.bindingCheckpoint) { throw new ReviewSafetyError('Check the server before completing this draft.'); }
+        if (pending.patchMismatch) { throw new PatchMismatchError(pending.id); }
         this.writing = true;
         try {
             const backend = this.backend(pending.plan.server);
             if (await backend.username(signal) !== pending.plan.username) { throw new ReviewSafetyError('Sign in as the original author.'); }
-            const conflict = await this.inspectConflict(signal);
-            if (conflict) { throw new CommitConflictError(conflict, pending.id); }
             const snapshot = await backend.snapshot(pending.id, signal);
+            const conflict = await this.inspectPendingConflict(pending, snapshot, signal);
+            if (conflict) { throw new CommitConflictError(conflict, pending.id); }
+            const alreadySynced = pending.fieldsSynced || (snapshot.draft?.commit_id === pending.plan.git.head
+                && snapshot.draft.extra_data.rbtflow_plan_id === pending.plan.id);
+            if (alreadySynced) {
+                // Read back our own write before comparing with the pre-write checkpoint.
+                const receipt = await backend.verify(pending.plan, pending.fields, pending.id, false, signal);
+                await this.pendingStore.save(undefined);
+                this.receipt = receipt;
+                this.invalidate();
+                return receipt;
+            }
             if (!sameSnapshot(snapshot, pending.bindingCheckpoint)) { throw new ReviewSafetyError('The draft changed since upload. Check the server before continuing.'); }
-            await backend.verifyUploaded(pending.plan, pending.id, false, signal);
-            await this.syncBinding(pending, signal);
+            const verifiedDiff = await backend.verifyUploaded(pending.plan, pending.id, false, signal);
+            await this.syncBinding(pending, signal, verifiedDiff);
+            pending.fieldsSynced = true;
+            await this.pendingStore.save(pending);
             const receipt = await backend.verify(pending.plan, pending.fields, pending.id, false, signal);
             await this.pendingStore.save(undefined); this.receipt = receipt; this.invalidate(); return receipt;
+        } catch (error) {
+            await this.rememberPatchMismatch(pending, error);
+            throw error;
         } finally { this.writing = false; }
     }
 }

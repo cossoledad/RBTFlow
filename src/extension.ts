@@ -71,6 +71,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<RBTFlo
         command('rbtflow.preview', async () => (await open())?.preview()),
         command('rbtflow.createDraft', async () => { await open(); await sidebar.createDraft(); }),
         command('rbtflow.publishRequest', async () => sidebar.current?.publishRequest()),
+        command('rbtflow.discardRequest', () => sidebar.current?.discardRequest()),
+        command('rbtflow.clearReview', () => sidebar.current?.clearReview()),
         command('rbtflow.settings', async () => (await open())?.settings()),
         command('rbtflow.newReview', async () => (await open())?.newSubmission()),
         command('rbtflow.myReviews', async () => { await (await open())?.myReviews(); await vscode.commands.executeCommand('rbtflow.review.focus'); }),

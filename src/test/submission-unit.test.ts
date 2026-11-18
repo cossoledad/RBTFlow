@@ -5,10 +5,21 @@ import { RequestSession, RequestWrite } from '../application/requestSession';
 import { RepositoryStore } from '../application/repositoryStore';
 import { sourceRange } from '../domain/comparison';
 import { RemoteComparison } from '../domain/comparison';
-import { digest, ReviewResource, ReviewSnapshot } from '../domain/model';
+import { digest, patchContentDigest, ReviewResource, ReviewSnapshot } from '../domain/model';
 import { assertBoundCommit, bindingKey, CommitBinding, fileSetHash, fullCommitId, readBinding, ServerDiff } from '../domain/submission';
 
 const server = 'http://reviews.example.test/', head = 'a'.repeat(40);
+
+test('Git patch identity tolerates reordered file blocks while protecting paths, modes and hunk bytes', () => {
+    const first = 'diff --git a/a b/a\nold mode 100644\nnew mode 100755\n';
+    const second = 'diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+new \n';
+    const original = patchContentDigest(Buffer.from(first + second));
+    assert.equal(patchContentDigest(Buffer.from(second + first + '\n')), original);
+    for (const patch of [first.replace('100755', '100644') + second, first + second.replace('+new ', '+new'),
+        first + second.replace('a/b b/b', 'a/c b/c'), first + second.replace('+new ', '+new \r')]) {
+        assert.notEqual(patchContentDigest(Buffer.from(patch)), original);
+    }
+});
 const binding: CommitBinding = { version: 1, planId: 'plan', head, repositoryId: 1, targetBranch: 'origin/main', diffId: 4, revision: 1,
     patchHash: digest('patch'), filesHash: fileSetHash(['file.txt']) };
 function resource(): ReviewResource {

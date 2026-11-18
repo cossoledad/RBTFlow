@@ -2,7 +2,7 @@
   "name": "rbtflow",
   "displayName": "RBTFlow",
   "description": "Native Review Board submission, comments, review inbox and diffs in VS Code.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "ganjinbo",
   "license": "UNLICENSED",
   "private": true,
@@ -98,6 +98,16 @@
         "command": "rbtflow.updateDiff",
         "title": "RBTFlow: Update Request Diff",
         "icon": "$(git-compare)"
+      },
+      {
+        "command": "rbtflow.discardRequest",
+        "title": "RBTFlow: Discard",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "rbtflow.clearReview",
+        "title": "RBTFlow: Clear Review",
+        "icon": "$(clear-all)"
       },
       {
         "command": "rbtflow.openDescription",
@@ -238,6 +248,7 @@
         {
           "id": "rbtflow.inbox",
           "name": "Inbox",
+          "when": "rbtflow.fullMode",
           "initialSize": 180
         },
         {
@@ -326,6 +337,16 @@
           "command": "rbtflow.openUrl",
           "when": "view == rbtflow.review && rbtflow.hasReview",
           "group": "navigation@4"
+        },
+        {
+          "command": "rbtflow.clearReview",
+          "when": "view == rbtflow.review && (rbtflow.hasReview || rbtflow.hasComparison) && !rbtflow.busy",
+          "group": "navigation@5"
+        },
+        {
+          "command": "rbtflow.discardRequest",
+          "when": "view == rbtflow.review && rbtflow.canDiscardRequest",
+          "group": "other@7"
         },
         {
           "command": "rbtflow.editRequest",
@@ -502,6 +523,13 @@
           "maximum": 1800,
           "description": "Timeout for each RBTools operation. Interrupted writes require checking server state."
         },
+        "rbtflow.mode": {
+          "type": "string",
+          "enum": ["minimal", "full"],
+          "default": "minimal",
+          "scope": "resource",
+          "description": "Minimal mode uses manual review actions. Full mode adds Inbox and automatic refresh."
+        },
         "rbtflow.notifications.enabled": {
           "type": "boolean",
           "default": true,
@@ -523,7 +551,7 @@
     "test": "npm run compile && node --test build/extension/test/core.test.js build/extension/test/repository.test.js build/extension/test/collaboration-unit.test.js build/extension/test/submission-unit.test.js build/extension/test/refresh-unit.test.js build/extension/test/conflict-unit.test.js",
     "test:integration": "npm run compile && node --test --test-concurrency=1 build/extension/test/integration.test.js build/extension/test/review.test.js build/extension/test/request.test.js build/extension/test/collaboration.test.js build/extension/test/submission.test.js",
     "test:host": "npm run compile && node scripts/test-host.cjs",
-    "package": "vsce package --skip-license --out build/rbtflow-0.6.1.vsix",
+    "package": "vsce package --skip-license --out build/rbtflow-0.6.2.vsix",
     "vscode:prepublish": "npm run icon && npm run compile",
     "icon": "node scripts/icon.cjs"
   },

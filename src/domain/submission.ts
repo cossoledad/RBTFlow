@@ -4,9 +4,15 @@ export const bindingKey = 'rbtflow_binding_v1';
 export interface CommitBinding {
     version: 1; planId: string; head: string; repositoryId: number; targetBranch: string;
     diffId: number; revision: number; patchHash: string; filesHash: string;
+    patchFormat?: 'git-blocks-v1';
 }
 export interface ServerDiff { id: number; revision: number; commit_count?: number; extra_data: Record<string, unknown>; }
 export class ReviewSafetyError extends Error {}
+export class PatchMismatchError extends ReviewSafetyError {
+    constructor(readonly requestId: number) {
+        super(`Draft #${requestId} does not match the preview. Open the draft or keep it and continue.`);
+    }
+}
 export class CommitConflictError extends ReviewSafetyError {
     constructor(readonly conflict: CommitConflict, readonly draftId?: number) {
         super(conflict.requests.length ? `HEAD is already linked to ${conflict.requests.map(request => '#' + request.id).join(', ')}.`
@@ -17,14 +23,17 @@ export function fullCommitId(value: unknown): value is string { return typeof va
 export function fileSetHash(paths: string[]): string { return digest(JSON.stringify([...paths].sort())); }
 export function bindingFor(plan: ReviewPlan, diff: Pick<ServerDiff, 'id' | 'revision'>): CommitBinding {
     return { version: 1, planId: plan.id, head: plan.git.head, repositoryId: plan.repository.id, targetBranch: plan.input.targetRef,
-        diffId: diff.id, revision: diff.revision, patchHash: plan.patchHash, filesHash: fileSetHash(plan.git.files.map(file => file.path)) };
+        diffId: diff.id, revision: diff.revision, patchHash: plan.patchContentHash ?? plan.patchHash,
+        ...(plan.patchContentHash ? { patchFormat: 'git-blocks-v1' as const } : {}),
+        filesHash: fileSetHash(plan.git.files.map(file => file.path)) };
 }
 export function readBinding(value: unknown): CommitBinding | undefined {
     if (value === undefined || value === null) { return; }
     let data: Partial<CommitBinding>;
     try { data = (typeof value === 'string' ? JSON.parse(value) : value) as Partial<CommitBinding>; }
     catch { throw new ReviewSafetyError('Invalid commit binding. Check the server.'); }
-    if (!data || data.version !== 1 || typeof data.planId !== 'string' || !data.planId || !fullCommitId(data.head)
+    if (!data || data.version !== 1 || (data.patchFormat !== undefined && data.patchFormat !== 'git-blocks-v1')
+        || typeof data.planId !== 'string' || !data.planId || !fullCommitId(data.head)
         || !Number.isSafeInteger(data.repositoryId) || data.repositoryId! < 1 || !Number.isSafeInteger(data.diffId) || data.diffId! < 1
         || !Number.isSafeInteger(data.revision) || data.revision! < 1 || typeof data.targetBranch !== 'string' || !data.targetBranch
         || !/^[a-f0-9]{64}$/.test(data.patchHash ?? '') || !/^[a-f0-9]{64}$/.test(data.filesHash ?? '')) {

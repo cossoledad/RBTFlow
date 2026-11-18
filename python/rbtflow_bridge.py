@@ -82,6 +82,51 @@ class EditRequest(BaseCommand):
             self.json.add("error", {"code": error.error_code, "message": str(error)})
 
 
+class DiscardRequest(BaseCommand):
+    name = "rbtflow-discard-request"
+    needs_api = True
+    args = "<request-id>"
+    option_list = [BaseCommand.server_options, Option("--fields-file", dest="fields_file")]
+
+    def main(self, request_id):
+        from rbtools.api.errors import APIError
+        with open(self.options.fields_file, encoding="utf-8") as stream:
+            data = json.load(stream)
+        try:
+            session = self.api_root.get_session().rsp["session"]
+            if not session.get("authenticated") or session["links"]["user"]["title"] != data["author"]:
+                self.json.add("error", {"code": 409, "message": "Sign in as the original author."})
+                self.json.add("not_applied", True)
+                return
+            request = self.api_root.get_review_request(review_request_id=int(request_id))
+            author = request.rsp["review_request"]["links"]["submitter"]["title"]
+            if author != data["author"]:
+                self.json.add("error", {"code": 409, "message": "Only the current author can discard this request."})
+                self.json.add("not_applied", True)
+                return
+            try:
+                draft = request.get_draft()
+            except APIError as error:
+                if error.error_code != 100:
+                    raise
+                draft = None
+            if (request.status != "pending" or request.public != data["public"]
+                    or request.last_updated != data["request_updated"]
+                    or (draft.last_updated if draft else None) != data["draft_updated"]
+                    or (draft.id if draft else None) != data["draft_id"]):
+                self.json.add("error", {"code": 409, "message": "Request changed. Refresh before discarding."})
+                self.json.add("not_applied", True)
+                return
+            if request.public and draft is not None:
+                draft.delete()
+            else:
+                request.update(status="discarded")
+        except APIError as error:
+            self.json.add("error", {"code": error.error_code, "message": str(error)})
+            return
+        self.json.add("discarded", True)
+
+
 class Context(BaseCommand):
     name = "rbtflow-context"
     needs_api = True
@@ -118,7 +163,9 @@ class SyncDraft(BaseCommand):
             raise CommandError('A full Git HEAD SHA is required')
         if binding is not None:
             required = {'version', 'planId', 'head', 'repositoryId', 'targetBranch', 'diffId', 'revision', 'patchHash', 'filesHash'}
-            if (not isinstance(binding, dict) or set(binding) != required or binding['version'] != 1 or binding['head'] != commit_id
+            if (not isinstance(binding, dict) or not required <= set(binding) or set(binding) - required - {'patchFormat'}
+                    or ('patchFormat' in binding and binding['patchFormat'] != 'git-blocks-v1')
+                    or binding['version'] != 1 or binding['head'] != commit_id
                     or binding['targetBranch'] != data.get('branch') or binding['planId'] != data.get('extra_data.rbtflow_plan_id')
                     or not all(isinstance(binding[key], int) and binding[key] > 0 for key in ('repositoryId', 'diffId', 'revision'))):
                 raise CommandError('Invalid RBTFlow commit binding')
@@ -147,6 +194,15 @@ class SyncDraft(BaseCommand):
         self.json.add("review_request_id", review.id)
 
 
+def git_patch_content_hash(data):
+    blocks = re.split(br'\n(?=diff --git )', data)
+    headers = {block.partition(b'\n')[0] for block in blocks}
+    if not blocks[0].startswith(b'diff --git ') or len(headers) != len(blocks):
+        return hashlib.sha256(data.rstrip(b'\n')).hexdigest()
+    hashes = sorted(hashlib.sha256(block.rstrip(b'\n')).hexdigest() for block in blocks)
+    return hashlib.sha256('\n'.join(hashes).encode('ascii')).hexdigest()
+
+
 class VerifyPatch(BaseCommand):
     name = "rbtflow-verify-patch"
     needs_api = True
@@ -164,19 +220,20 @@ class VerifyPatch(BaseCommand):
             data = data.encode("utf-8")
         # rbt diff adds a console newline which is absent in the API patch.
         self.json.add("patch_hash", hashlib.sha256(data.rstrip(b"\n")).hexdigest())
+        self.json.add("patch_content_hash", git_patch_content_hash(data))
 
 
 class FindCommitRequests(BaseCommand):
     """Find public commit owners and our own drafts; never probe others' drafts."""
     name = 'rbtflow-find-commit'
     needs_api = True
-    args = '<repository-id> <head> <exclude-id>'
+    args = '<repository-id> <head> <exclude-id> [draft-budget]'
     option_list = [BaseCommand.server_options]
 
-    def main(self, repository_id, head, exclude_id):
+    def main(self, repository_id, head, exclude_id, draft_budget='12'):
         from rbtools.api.errors import APIError
-        repository_id, exclude_id = int(repository_id), int(exclude_id)
-        if repository_id < 1 or exclude_id < 0 or not re.fullmatch(r'(?:[a-f0-9]{40}|[a-f0-9]{64})', head):
+        repository_id, exclude_id, draft_budget = int(repository_id), int(exclude_id), int(draft_budget)
+        if repository_id < 1 or exclude_id < 0 or not 0 <= draft_budget <= 12 or not re.fullmatch(r'(?:[a-f0-9]{40}|[a-f0-9]{64})', head):
             raise CommandError('Invalid commit lookup')
         session = self.api_root.get_session().rsp['session']
         username = session.get('links', {}).get('user', {}).get('title')
@@ -209,8 +266,12 @@ class FindCommitRequests(BaseCommand):
             if review.get('commit_id') == head:
                 add(review)
         # The commit-id query filters the public database column, not draft.commit_id.
-        if not found:
-            for review in requests(**{'from-user': username}):
+        if not found and draft_budget:
+            # One bounded page, even if the account has thousands of requests.
+            recent = self.api_client.get_path('/review-requests/', **{
+                'repository': repository_id, 'status': 'all', 'max-results': draft_budget, 'from-user': username,
+            }).rsp['review_requests']
+            for review in recent[:draft_budget]:
                 if review['id'] == exclude_id or review['links'].get('submitter', {}).get('title') != username:
                     continue
                 try:
@@ -276,6 +337,8 @@ class WatchUpdates(BaseCommand):
                 return {'id': request_id, 'type': value['type'], 'timestamp': value['timestamp'],
                         'actor': user if isinstance(user, str) else user.get('username', '')}
             except APIError as error:
+                if error.error_code == 114:
+                    raise
                 errors.append({'id': request_id, 'code': error.error_code, 'message': str(error)})
                 return None
 

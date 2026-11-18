@@ -4,7 +4,7 @@ import { ApiError, RBToolsAdapter } from '../adapters/rbtools';
 import { GitAdapter } from '../adapters/git';
 import { PendingStore, ReviewSession } from '../application/reviewSession';
 import { CommitConflict, patchDigest, PendingWrite, Receipt, ReviewPlan, ReviewSnapshot } from '../domain/model';
-import { CommitConflictError, ServerDiff } from '../domain/submission';
+import { CommitConflictError, PatchMismatchError, ServerDiff } from '../domain/submission';
 import { snapshotFingerprint } from '../domain/snapshot';
 import { fields, input } from './helpers';
 
@@ -20,7 +20,7 @@ function fixture() {
         commit_id: null, extra_data: {}, links: { submitter: { title: 'alice', href: server + 'api/users/alice/' }, repository: { href: server + 'api/repositories/1/' } } };
     const snapshot: ReviewSnapshot = { review, draft: { ...structuredClone(review), changedescription: '' }, fingerprint: '' };
     class Backend extends RBToolsAdapter {
-        owners: CommitConflict['requests'] = []; uploads = 0; bindings = 0; fail = false; raceOwner = false;
+        owners: CommitConflict['requests'] = []; uploads = 0; bindings = 0; fail = false; raceOwner = false; mismatch = false;
         constructor() { super('/unused', { executable: 'unused', storage: '/unused', server }); }
         override async username(): Promise<string> { return 'alice'; }
         override async validatePeople(): Promise<void> {}
@@ -37,8 +37,11 @@ function fixture() {
             snapshot.draft!.commit_id = current.git.head;
         }
         override async verifyUploaded(): Promise<ServerDiff> { return { id: 4, revision: 1, extra_data: {} }; }
-        override async verify(): Promise<Receipt> { return { id: 2, url: server + 'r/2/', diffRevision: 1, published: false,
-            fingerprint: snapshotFingerprint(snapshot), verification: 'patch-and-metadata' }; }
+        override async verify(): Promise<Receipt> {
+            if (this.mismatch) { throw new PatchMismatchError(2); }
+            return { id: 2, url: server + 'r/2/', diffRevision: 1, published: false,
+                fingerprint: snapshotFingerprint(snapshot), verification: 'patch-and-metadata' };
+        }
     }
     class Git extends GitAdapter { override async fingerprint(): Promise<string> { return 'stable'; } }
     const backend = new Backend(), create = () => new ReviewSession('/unused', new Git(), () => backend, journal);
@@ -51,6 +54,18 @@ test('commit ownership is checked before upload; an existing request cannot crea
     await assert.rejects(f.session.post(f.plan.id, f.plan.input, fields), error => error instanceof CommitConflictError && error.conflict.requests[0]?.id === 1);
     assert.equal(f.backend.uploads, 0); assert.equal(f.backend.bindings, 0); assert.equal(f.session.pending, undefined);
     assert.equal(f.session.conflict?.requests[0]?.id, 1);
+});
+
+test('a legacy post-sync mismatch is classified before comparing the pre-sync checkpoint and can never rewrite the draft', async () => {
+    const f = fixture(), checkpoint = await f.backend.snapshot();
+    f.snapshot.draft!.commit_id = f.plan.git.head;
+    f.snapshot.draft!.extra_data.rbtflow_plan_id = f.plan.id;
+    await f.journal.save({ kind: 'post', plan: f.plan, fields, id: 2, bindingCheckpoint: checkpoint });
+    f.backend.mismatch = true;
+    await assert.rejects(f.session.completeBinding(), PatchMismatchError);
+    assert.equal(f.session.pending?.patchMismatch, true);
+    await assert.rejects(f.session.completeBinding(), PatchMismatchError);
+    assert.equal(f.backend.bindings, 0); assert.equal(f.backend.uploads, 0);
 });
 
 test('a raced 227 persists a known conflict; check and complete never repeat the failed write across restart', async () => {

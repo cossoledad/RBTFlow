@@ -6,10 +6,12 @@ import { assertBoundCommit, bindingKey, CommitBinding, fileSetHash, readBinding,
 import { sameSnapshot } from '../domain/snapshot';
 
 export type RequestMetadata = Pick<ReviewFields, 'summary' | 'description' | 'people' | 'groups' | 'bugs'>;
-export interface RequestWrite {
+interface RequestEditWrite {
     kind: 'metadata' | 'publish'; comparison: RemoteComparison; fields: ReviewFields; patchHash: string; operationId: string;
     binding?: CommitBinding;
 }
+interface RequestDiscardWrite { kind: 'discard'; scope: 'draft' | 'request'; comparison: RemoteComparison; }
+export type RequestWrite = RequestEditWrite | RequestDiscardWrite;
 export interface RequestStore { load(): RequestWrite | undefined; save(value: RequestWrite | undefined): Promise<void>; }
 export interface RequestReceipt { id: number; server: string; published: boolean; applied: boolean; }
 
@@ -43,7 +45,7 @@ export class RequestSession {
         if (comparison.selected.revision !== Math.max(...comparison.versions.map(item => item.revision))) { throw new Error('Select the latest diff first.'); }
         return snapshot;
     }
-    private async verifyDiff(write: RequestWrite, published: boolean, signal?: AbortSignal): Promise<void> {
+    private async verifyDiff(write: RequestEditWrite, published: boolean, signal?: AbortSignal): Promise<void> {
         const comparison = write.comparison, scope = published ? 'published' : comparison.selected.scope;
         const backend = this.backend(comparison.server), prefix = `/review-requests/${comparison.requestId}/${scope === 'draft' ? 'draft/' : ''}diffs/`;
         const diffs = await backend.list<ServerDiff>(prefix, 'diffs', {}, signal);
@@ -54,7 +56,14 @@ export class RequestSession {
         if (comparison.patchHash && comparison.patchHash !== write.patchHash) { throw new ReviewSafetyError('The diff changed since it was opened. Refresh before continuing.'); }
         if (write.binding) {
             const actual = readBinding(diff.extra_data?.[bindingKey]);
-            if (!actual || Object.entries(write.binding).some(([key, value]) => actual[key as keyof CommitBinding] !== value) || write.patchHash !== actual.patchHash) {
+            if (!actual || actual.patchFormat !== write.binding.patchFormat
+                || Object.entries(write.binding).some(([key, value]) => actual[key as keyof CommitBinding] !== value)) {
+                throw new ReviewSafetyError('The diff no longer matches its confirmed HEAD. Preview and save it again.');
+            }
+            const boundHash = actual.patchFormat
+                ? await backend.patchHash(comparison.requestId, comparison.selected.revision, scope, signal, actual.patchFormat)
+                : write.patchHash;
+            if (boundHash !== actual.patchHash) {
                 throw new ReviewSafetyError('The diff no longer matches its confirmed HEAD. Preview and save it again.');
             }
             const files = await backend.list<{ source_file: string; dest_file: string }>(`${prefix}${diff.revision}/files/`, 'files', {}, signal);
@@ -84,6 +93,13 @@ export class RequestSession {
     }
     private async result(write: RequestWrite, signal?: AbortSignal): Promise<RequestReceipt> {
         const backend = this.backend(write.comparison.server), snapshot = await backend.snapshot(write.comparison.requestId, signal);
+        if (write.kind === 'discard') {
+            const applied = write.scope === 'draft'
+                ? snapshot.review.public && snapshot.review.status === 'pending' && !snapshot.draft
+                : snapshot.review.status === 'discarded';
+            if (!applied) { throw new ReviewSafetyError('Discard result is unknown. Check the server.'); }
+            return { id: snapshot.review.id, server: write.comparison.server, published: snapshot.review.public, applied: true };
+        }
         const published = write.kind === 'publish';
         if (!equalFields(snapshot, write.fields, published) || (published && (!snapshot.review.public || snapshot.draft))) {
             throw new Error('Request result does not match. Check the server.');
@@ -109,7 +125,7 @@ export class RequestSession {
             const snapshot = await this.current(comparison, signal), fields = { ...requestFields(snapshot), ...structuredClone(changes) };
             validateFields(fields);
             const backend = this.backend(comparison.server); await backend.validatePeople(fields, signal);
-            const write: RequestWrite = { kind: 'metadata', comparison: structuredClone(comparison), fields,
+            const write: RequestEditWrite = { kind: 'metadata', comparison: structuredClone(comparison), fields,
                 patchHash: await backend.patchHash(comparison.requestId, comparison.selected.revision, comparison.selected.scope, signal), operationId: randomUUID(),
                 binding: await this.binding(comparison, snapshot, signal) };
             await this.verifyDiff(write, false, signal);
@@ -131,7 +147,7 @@ export class RequestSession {
             const binding = await this.binding(comparison, snapshot, signal);
             const fields = requestFields(snapshot); validatePublication(fields); validateFields(fields);
             const backend = this.backend(comparison.server); await backend.validatePeople(fields, signal);
-            const write: RequestWrite = { kind: 'publish', comparison: structuredClone(comparison), fields,
+            const write: RequestEditWrite = { kind: 'publish', comparison: structuredClone(comparison), fields,
                 patchHash: await backend.patchHash(comparison.requestId, comparison.selected.revision, comparison.selected.scope, signal), operationId: randomUUID(),
                 binding };
             await this.verifyDiff(write, false, signal);
@@ -139,6 +155,24 @@ export class RequestSession {
             try { await backend.publish(comparison.requestId, signal); }
             catch (error) { return await this.rejected(error, write, signal); }
             const receipt = await this.result(write, signal); await this.store.save(undefined); return receipt;
+        } finally { this.writing = false; }
+    }
+    async discard(comparison: RemoteComparison, signal?: AbortSignal): Promise<RequestReceipt> {
+        this.idle();
+        this.writing = true;
+        try {
+            const snapshot = await this.current(comparison, signal);
+            const draftOnly = snapshot.review.public && !!snapshot.draft;
+            const write: RequestDiscardWrite = {
+                kind: 'discard', scope: draftOnly ? 'draft' : 'request', comparison: structuredClone(comparison),
+            };
+            await this.store.save(write);
+            try {
+                await this.backend(comparison.server).discardRequest(comparison.requestId, snapshot, comparison.username, signal);
+            } catch (error) { return await this.rejected(error, write, signal); }
+            const receipt = await this.result(write, signal);
+            await this.store.save(undefined);
+            return receipt;
         } finally { this.writing = false; }
     }
     async reconcile(signal?: AbortSignal): Promise<RequestReceipt | undefined> {

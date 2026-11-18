@@ -11,7 +11,7 @@ import { RequestSession, RequestWrite } from '../application/requestSession';
 import { PublishValidationError } from '../domain/model';
 import { FilePending, fields, git, input, labPage, labRoot, rbtPath, temporary, uniqueFixtureHead } from './helpers';
 
-test('Git defaults, API 225 classification, legacy recovery and server-only draft editing/publication', { timeout: 120_000 }, async () => {
+test('request lifecycle on a separate checkout: edit, publish, discard and recover lost responses', { timeout: 150_000 }, async () => {
     const dir = await temporary('request-'), checkout = path.join(dir, 'unrelated-checkout'), root = path.join(dir, 'author');
     await git(labRoot, 'worktree', 'add', '--detach', root, 'feature/merged');
     await copyFile(path.join(labRoot, '.reviewboardrc'), path.join(root, '.reviewboardrc')); await uniqueFixtureHead(root);
@@ -66,6 +66,37 @@ test('Git defaults, API 225 classification, legacy recovery and server-only draf
     const lost = new RequestSession(server => new LostResponse(checkout, { executable: rbtPath, storage: dir, server }), journal);
     await assert.rejects(lost.publish(metadataOnly), /lost publish/); assert(pending);
     assert.equal((await new RequestSession(remoteFactory, journal).reconcile())?.published, true); assert.equal(pending, undefined);
+
+    const publishedBeforeDiscard = await browser.open(plan.server, saved.id);
+    await request.edit(publishedBeforeDiscard, { bugs: ['DISCARD-ME'] });
+    await assert.rejects(request.discard(publishedBeforeDiscard), /Request content changed/);
+    const draftToDiscard = await browser.open(plan.server, saved.id);
+    class LostDiscardResponse extends RBToolsAdapter {
+        override async discardRequest(...args: Parameters<RBToolsAdapter['discardRequest']>): Promise<void> {
+            await super.discardRequest(...args);
+            throw new ProcessError('Injected lost discard response', Buffer.alloc(0), Buffer.alloc(0), 'exit');
+        }
+    }
+    const lostDiscard = new RequestSession(server => new LostDiscardResponse(checkout, { executable: rbtPath, storage: dir, server }), journal);
+    await assert.rejects(lostDiscard.discard(draftToDiscard), /lost discard/);
+    assert.equal((journal.load() as RequestWrite | undefined)?.kind, 'discard');
+    assert.equal((await request.reconcile())?.applied, true);
+    assert.equal(journal.load(), undefined);
+    const afterDiscard = await browser.open(plan.server, saved.id);
+    assert.equal(afterDiscard.requestSnapshot?.draft, null);
+    assert.equal(afterDiscard.review.status, 'pending');
+    assert.deepEqual(afterDiscard.details.bugs_closed, ['METADATA-2']);
+    assert.equal(afterDiscard.selected.id, publishedBeforeDiscard.selected.id);
+    assert.equal((await request.discard(afterDiscard)).applied, true);
+    assert.equal((await adapter.snapshot(saved.id)).review.status, 'discarded');
+
+    await uniqueFixtureHead(root);
+    const newPlan = await session.preview(input);
+    const newDraft = await session.post(newPlan.id, newPlan.input, fields);
+    await request.discard(await browser.open(newPlan.server, newDraft.id));
+    const closed = await adapter.snapshot(newDraft.id);
+    assert.equal(closed.review.status, 'discarded');
+    assert.equal(closed.review.public, false);
     await git(labRoot, 'worktree', 'remove', '--force', checkout);
     await git(labRoot, 'worktree', 'remove', '--force', root);
 });

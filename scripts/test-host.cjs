@@ -67,6 +67,7 @@ async function main() {
   await fs.writeFile(path.join(user, 'User/settings.json'), JSON.stringify({
     'rbtflow.rbtPath': path.join(root, 'build/venv/bin/rbt'),
     'rbtflow.notifications.enabled': false,
+    ...(process.env.RBTFLOW_HOST_DEFAULT_MODE ? {} : { 'rbtflow.mode': 'full' }),
     'telemetry.telemetryLevel': 'off', 'update.mode': 'none', 'git.autofetch': false,
     'workbench.startupEditor': 'none', 'window.restoreWindows': 'none',
   }));

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.2
+
+- Discard a request or its unpublished changes from Review, with confirmation.
+- Clear Review and Changes locally, then reopen an existing draft from Submit.
+
+- Default to Minimal mode with manual review actions. Full mode enables Inbox and automatic refresh.
+- Publish a chosen number of Ship It reviews from the signed-in account.
+- Preserve the full selected target branch in every diff mode.
+- Compare complete file patches independently of their order and keep mismatched drafts available for inspection.
+- Bound the private-draft lookup and back off after API rate limits.
+
 ## 0.6.1
 
 - Check public commit owners and your private drafts before uploading a bound HEAD; avoid creating duplicate requests.

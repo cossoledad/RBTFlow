@@ -7,7 +7,17 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from rbtools.commands.base import CommandError
-from rbtflow_bridge import FindCommitRequests, SyncDraft
+from rbtflow_bridge import FindCommitRequests, SyncDraft, git_patch_content_hash
+
+
+class PatchHashTest(unittest.TestCase):
+    def test_block_order_preserves_mode_and_payload_bytes(self):
+        first = b'diff --git a/a b/a\nold mode 100644\nnew mode 100755\n'
+        second = b'diff --git a/b b/b\n@@ -1 +1 @@\n-old\n+new \xff\n'
+        expected = git_patch_content_hash(first + second)
+        self.assertEqual(expected, git_patch_content_hash(second + first + b'\n'))
+        self.assertNotEqual(expected, git_patch_content_hash(first + second.replace(b' \xff', b'\xff')))
+        self.assertNotEqual(expected, git_patch_content_hash(first.replace(b'100755', b'100644') + second))
 
 
 class SyncDraftTest(unittest.TestCase):
@@ -90,6 +100,9 @@ class CommitOwnersTest(unittest.TestCase):
         command.main('1', head, '1')
         values = {call.args[0]: call.args[1] for call in command.json.add.call_args_list}
         self.assertEqual([value['id'] for value in values['requests']], [2])
+        command.api_client.get_path.reset_mock()
+        command.main('1', head, '1', '0')
+        command.api_client.get_path.assert_called_once()
 
     def test_invalid_repository_head_or_exclusion_never_queries_the_server(self):
         command = object.__new__(FindCommitRequests)

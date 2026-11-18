@@ -34,7 +34,7 @@ export class InboxView implements vscode.TreeDataProvider<InboxItem>, vscode.Fil
     private source?: ReviewController;
     private signature = '';
     private generation = 0;
-    private enabled = true;
+    private enabled = false;
     private interval = 60;
     private first = true;
     private session?: InboxSession;
@@ -47,28 +47,32 @@ export class InboxView implements vscode.TreeDataProvider<InboxItem>, vscode.Fil
         this.store = new InboxStore(context.globalState);
         this.view = vscode.window.createTreeView('rbtflow.inbox', { treeDataProvider: this });
         this.subscriptions.push(vscode.window.registerFileDecorationProvider(this), vscode.workspace.onDidChangeConfiguration(event => {
-            if (event.affectsConfiguration('rbtflow.notifications')) { this.follow(this.active(), true); }
+            if (event.affectsConfiguration('rbtflow.notifications') || event.affectsConfiguration('rbtflow.mode')) {
+                this.follow(this.active(), true);
+            }
         }), vscode.window.onDidChangeWindowState(state => { if (state.focused && this.enabled) { void this.refresh(true); } }));
     }
     get unreadCount(): number { return this.state?.entries.filter(entry => isUnread(this.state!, entry)).length ?? 0; }
     follow(source?: ReviewController, force = false): void {
         const settings = source?.store.settings(), config = vscode.workspace.getConfiguration('rbtflow', source && vscode.Uri.file(source.root));
-        const enabled = settings?.notificationsEnabled ?? config.get('notifications.enabled', true);
+        const fullMode = source?.pluginMode === 'full';
+        const enabled = fullMode && (settings?.notificationsEnabled ?? config.get('notifications.enabled', true));
         const interval = settings?.pollIntervalSeconds ?? config.get('notifications.pollIntervalSeconds', 60);
-        const signature = JSON.stringify([source?.root, source?.form.server, source?.connectionVersion, settings?.rbtPath, settings?.timeoutSeconds, enabled, interval]);
+        const signature = JSON.stringify([source?.root, source?.form.server, source?.connectionVersion, settings?.rbtPath, settings?.timeoutSeconds, fullMode, enabled, interval]);
         if (!force && source === this.source && signature === this.signature) { return; }
         this.generation++; this.operation?.abort(); this.session?.cancel(); clearTimeout(this.timer);
         this.source = source; this.signature = signature; this.enabled = enabled; this.interval = Math.max(30, Math.min(3600, interval));
+        void vscode.commands.executeCommand('setContext', 'rbtflow.fullMode', fullMode);
         this.state = undefined; this.pending = undefined; this.busy = false; this.first = true;
         this.view.message = enabled ? undefined : 'Auto refresh off';
-        this.session = source ? new InboxSession(server => source.backend(server), this.store) : undefined;
+        this.session = source && fullMode ? new InboxSession(server => source.backend(server), this.store) : undefined;
         this.paint();
         if (source?.form.server && enabled) { void this.refresh(false); }
     }
     async refresh(notify = false): Promise<void> {
         if (this.pending) { return this.pending; }
         const source = this.source, session = this.session;
-        if (!source || !session || !source.form.server) { return; }
+        if (!source || source.pluginMode !== 'full' || !session || !source.form.server) { return; }
         const version = this.generation, operation = new AbortController(); this.operation = operation;
         clearTimeout(this.timer); this.busy = true; this.paint();
         const job = (async () => {
@@ -134,6 +138,7 @@ export class InboxView implements vscode.TreeDataProvider<InboxItem>, vscode.Fil
         if (this.state && inboxKey(state.identity) === inboxKey(this.state.identity)) { this.state = state; this.paint(); }
     }
     async viewed(comparison: RemoteComparison, opened?: InboxTarget): Promise<void> {
+        if (this.source?.pluginMode !== 'full') { return; }
         if (!comparison.review.public || comparison.selected.scope !== 'published' || comparison.selected.revision !== requestRevision(comparison.review)) { return; }
         const identity = { server: comparison.server, username: comparison.username }, entry = inboxEntry(comparison.review, false, comparison.activity);
         const observations = [entry];

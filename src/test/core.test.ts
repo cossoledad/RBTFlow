@@ -3,11 +3,26 @@ import { test } from 'node:test';
 import { readdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitAdapter } from '../adapters/git';
-import { Connection, RBToolsAdapter } from '../adapters/rbtools';
+import { ApiError, Connection, RBToolsAdapter } from '../adapters/rbtools';
 import { ProcessError, runProcess } from '../adapters/process';
 import { ReviewSession } from '../application/reviewSession';
 import { inputKey } from '../domain/model';
 import { fixtures, git, input, fields, temporary } from './helpers';
+
+test('API 114 pauses subsequent commands on the same server across adapter instances', async () => {
+    const root = await temporary('rate-limit-');
+    const executable = path.join(root, 'rbt-fixture');
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" \'{"errors":["API Error 114: API Rate Limit Exceeded"]}\'\nexit 1\n', { mode: 0o700 });
+    const calls: string[] = [];
+    const adapter = (server: string) => new RBToolsAdapter(root, { executable, storage: root, server, log: text => calls.push(text) });
+    const isLimited = (error: unknown) => error instanceof ApiError && error.code === 114;
+    await assert.rejects(adapter('https://limited.example.invalid/').command(['rbtflow-find-commit']), isLimited);
+    assert.equal(calls.length, 1);
+    await assert.rejects(adapter('https://limited.example.invalid/').command(['rbtflow-watch']), isLimited);
+    assert.equal(calls.length, 1, 'The second command never starts');
+    await assert.rejects(adapter('https://separate.example.invalid/').command(['api-get']), isLimited);
+    assert.equal(calls.length, 2);
+});
 
 test('real Git DAG: linear, upstream merge, side merge, conflict resolution and stacked baseline', async () => {
     const data = await fixtures(), adapter = new GitAdapter();

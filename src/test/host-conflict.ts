@@ -17,7 +17,7 @@ export async function run(): Promise<void> {
     assert(await controller.preview()); const plan = controller.session.plan!;
     assert(await controller.createDraft()); const id = controller.browser.current!.requestId, backend = controller.backend(plan.server);
     const owner = await backend.snapshot(id);
-    assert(await controller.preview()); assert.equal(controller.canCreate, false);
+    assert(await controller.preview()); assert.equal(await controller.createDraft(), false);
     assert.equal(controller.session.conflict?.requests[0]?.id, id);
     await api.sidebar.run(api.sidebar.review.getChildren().find(item => item.key === `commitOwner:${id}`)!.action!);
     checks.push('private-draft-owner-preflight-and-native-open-existing');
